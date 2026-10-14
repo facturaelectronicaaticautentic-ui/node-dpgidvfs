@@ -23,6 +23,27 @@ const siigoClient = axios.create({
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const pad = (n) => String(n).padStart(2, '0');
 
+// ---------- Comercial asignado por tercero (se guarda en asignaciones.json) ----------
+const fs = require('fs');
+const path = require('path');
+const ARCHIVO_ASIGNACIONES = path.join(process.env.DATA_DIR || __dirname, 'asignaciones.json');
+let asignaciones = {};
+try { asignaciones = JSON.parse(fs.readFileSync(ARCHIVO_ASIGNACIONES, 'utf8')); } catch (e) { asignaciones = {}; }
+function guardarAsignaciones() {
+  try { fs.writeFileSync(ARCHIVO_ASIGNACIONES, JSON.stringify(asignaciones, null, 2)); }
+  catch (e) { console.error('No se pudo guardar asignaciones.json:', e.message); }
+}
+
+function describirError(e) {
+  if (e.response) {
+    const d = e.response.data;
+    const msg = d && d.Errors && d.Errors[0] ? d.Errors[0].Message
+      : (d && d.errors && d.errors[0] ? d.errors[0].message : '');
+    return `HTTP ${e.response.status}${msg ? ' - ' + msg : ''}`;
+  }
+  return e.message;
+}
+
 // Base de datos temporal en memoria para Contratos
 let contratosBD = [
   { id: 1, cliente: 'INTELCOST SAS', valor: 15000000, fechaInicio: '2026-01-01', fechaFin: '2026-12-31', estado: 'ACTIVO', responsable: 'MARIA GOMEZ' },
@@ -157,7 +178,7 @@ async function facturasDeEmpresa(emp, desde, hasta) {
       vencimiento: f.payments && f.payments[0] ? f.payments[0].due_date || '-' : '-',
       condicion: saldo > 0 ? 'PENDIENTE' : 'PAGADO',
       fechaPago: saldo === 0 ? f.date : '-',
-      responsable: seller ? (seller.name || `${seller.first_name || ''} ${seller.last_name || ''}`.trim() || String(seller)) : 'N/A',
+      responsable: asignaciones[String(nit).trim()] || (seller ? (seller.name || `${seller.first_name || ''} ${seller.last_name || ''}`.trim() || String(seller)) : 'N/A'),
       valor: valorBruto(f),
       total: Number(f.total) || 0,
       saldo,
@@ -176,23 +197,126 @@ app.get('/api/facturas', async (req, res) => {
 
   // Solo se usan datos demo si no hay credenciales configuradas
   if (conCredenciales.length === 0) {
-    return res.json([
+    return res.json({ resumen: [], facturas: [
       { cliente: 'YOBANY ALBERTO LOPEZ QUINTERO', nit: '', mes: 'ENERO', numMes: 0, ano: '2026', numero: '14201', fecha: '2026-01-15', vencimiento: '-', condicion: 'PAGADO', fechaPago: '2026-01-20', responsable: 'JUAN PEREZ', valor: 10921780, total: 10921780, saldo: 0, empresa: 'Empresa 1' },
       { cliente: 'INTELCOST SAS', nit: '', mes: 'OCTUBRE', numMes: 9, ano: '2026', numero: '14531', fecha: '2026-10-01', vencimiento: '-', condicion: 'PENDIENTE', fechaPago: '-', responsable: 'MARIA GOMEZ', valor: 3450000, total: 3450000, saldo: 3450000, empresa: 'Empresa 1' }
-    ]);
+    ] });
   }
 
-  const resultados = await Promise.all(conCredenciales.map(async (emp) => {
+  const resultados = await Promise.all(empresas.map(async (emp) => {
+    if (!emp.user || !emp.key) {
+      return { empresa: emp.nombre, facturas: [], error: `Faltan credenciales (EMPRESA${emp.id}_USER / EMPRESA${emp.id}_KEY) en el .env` };
+    }
     try {
-      return await facturasDeEmpresa(emp, desde, hasta);
+      const facturas = await facturasDeEmpresa(emp, desde, hasta);
+      return { empresa: emp.nombre, facturas, error: null };
     } catch (e) {
-      console.error(`[${emp.nombre}] Error consultando Siigo:`, e.response ? `${e.response.status} ${JSON.stringify(e.response.data)}` : e.message);
-      return [];
+      const error = describirError(e);
+      console.error(`[${emp.nombre}] Error consultando Siigo:`, error);
+      return { empresa: emp.nombre, facturas: [], error };
     }
   }));
 
-  const todas = resultados.flat().sort((a, b) => String(b.fecha).localeCompare(String(a.fecha)));
-  res.json(todas);
+  const facturas = resultados.flatMap(r => r.facturas).sort((a, b) => String(b.fecha).localeCompare(String(a.fecha)));
+  res.json({
+    facturas,
+    resumen: resultados.map(r => ({ empresa: r.empresa, cantidad: r.facturas.length, error: r.error }))
+  });
+});
+
+// ---------- Terceros (clientes) de ambas empresas + comercial asignado ----------
+let tercerosCache = { ts: 0, base: [], resumen: [] };
+
+function mapearTercero(emp, c) {
+  const nit = String(c.identification || '').trim();
+  const contacto = (c.contacts && c.contacts[0]) || {};
+  const telefono = (c.phones && c.phones[0] && c.phones[0].number) || (contacto.phone && contacto.phone.number) || '';
+  const ciudad = c.address && c.address.city ? (c.address.city.city_name || '') : '';
+  const tipo = c.person_type === 'Company' ? 'EMPRESA' : c.person_type === 'Person' ? 'PERSONA' : (c.person_type || '');
+  return {
+    nit,
+    nombre: (nombreDeCliente(c) || (nit ? `TERCERO (${nit})` : 'N/A')).toUpperCase(),
+    tipo,
+    ciudad,
+    email: contacto.email || '',
+    telefono: String(telefono),
+    empresa: emp.nombre
+  };
+}
+
+async function traerTerceros(emp) {
+  const token = await getToken(emp);
+  if (!token) return [];
+  const todos = [];
+  let page = 1;
+  let total = Infinity;
+  while (todos.length < total) {
+    const data = await siigoGet('/v1/customers', { page, page_size: 100 }, token);
+    const results = data.results || [];
+    total = data.pagination && data.pagination.total_results != null ? data.pagination.total_results : results.length;
+    todos.push(...results);
+    if (results.length === 0) break;
+    page++;
+  }
+  return todos.map(c => mapearTercero(emp, c));
+}
+
+function aplicarAsignaciones(base) {
+  return base.map(t => ({ ...t, comercial: asignaciones[t.nit] || '' }));
+}
+
+// GET /api/terceros            (usa caché de 10 min)
+// GET /api/terceros?refrescar=1 (vuelve a leer Siigo)
+app.get('/api/terceros', async (req, res) => {
+  const vigente = Date.now() - tercerosCache.ts < 10 * 60 * 1000;
+  if (!req.query.refrescar && vigente) {
+    return res.json({ terceros: aplicarAsignaciones(tercerosCache.base), resumen: tercerosCache.resumen });
+  }
+
+  const resultados = await Promise.all(empresas.map(async (emp) => {
+    if (!emp.user || !emp.key) {
+      return { empresa: emp.nombre, terceros: [], error: `Faltan credenciales (EMPRESA${emp.id}_USER / EMPRESA${emp.id}_KEY) en el .env` };
+    }
+    try {
+      return { empresa: emp.nombre, terceros: await traerTerceros(emp), error: null };
+    } catch (e) {
+      const error = describirError(e);
+      console.error(`[${emp.nombre}] Error leyendo terceros:`, error);
+      return { empresa: emp.nombre, terceros: [], error };
+    }
+  }));
+
+  // Un mismo NIT puede existir en las dos empresas: se une en una sola fila
+  const mapa = new Map();
+  resultados.forEach(r => r.terceros.forEach(t => {
+    if (!t.nit) return;
+    const previo = mapa.get(t.nit);
+    if (previo) {
+      if (!previo.empresas.includes(t.empresa)) previo.empresas.push(t.empresa);
+      ['email', 'telefono', 'ciudad', 'tipo'].forEach(k => { if (!previo[k]) previo[k] = t[k]; });
+    } else {
+      const { empresa, ...resto } = t;
+      mapa.set(t.nit, { ...resto, empresas: [empresa] });
+    }
+  }));
+
+  const base = [...mapa.values()].sort((a, b) => a.nombre.localeCompare(b.nombre));
+  const resumen = resultados.map(r => ({ empresa: r.empresa, cantidad: r.terceros.length, error: r.error }));
+
+  // Solo se cachea si ambas empresas respondieron bien
+  tercerosCache = { ts: resumen.some(r => r.error) ? 0 : Date.now(), base, resumen };
+  res.json({ terceros: aplicarAsignaciones(base), resumen });
+});
+
+// PUT /api/terceros/:nit/comercial   body: { comercial: "NOMBRE" }  (vacío = quitar asignación)
+app.put('/api/terceros/:nit/comercial', (req, res) => {
+  const nit = String(req.params.nit || '').trim();
+  const comercial = String((req.body && req.body.comercial) || '').trim().toUpperCase();
+  if (!nit) return res.status(400).json({ success: false, error: 'NIT requerido' });
+  if (comercial) asignaciones[nit] = comercial;
+  else delete asignaciones[nit];
+  guardarAsignaciones();
+  res.json({ success: true });
 });
 
 // Endpoints para Contratos
@@ -239,6 +363,12 @@ app.get('/', (req, res) => {
         .form-container { background: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
         .form-container input, .form-container select { padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; }
         .btn-submit { background: #002d5b; color: white; border: none; padding: 10px; border-radius: 6px; font-weight: bold; cursor: pointer; grid-column: 1 / -1; }
+              .aviso { background: #ecfdf5; color: #065f46; padding: 10px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 12px; }
+        .aviso:empty { display: none; }
+        .aviso.aviso-error { background: #fef2f2; color: #b91c1c; }
+        .filters-container input.buscar { flex: 2; min-width: 220px; padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; }
+        .btn-small { background: #002d5b; color: white; border: none; padding: 8px 14px; border-radius: 6px; font-weight: bold; font-size: 12px; cursor: pointer; }
+        .inp-comercial { width: 200px; padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 12px; }
       </style>
     </head>
     <body>
@@ -259,10 +389,13 @@ app.get('/', (req, res) => {
         <select id="filterEmpresa" onchange="aplicarFiltros()"><option value="">EMPRESA (Todas)</option></select>
       </div>
 
+      <div id="avisoEmpresas" class="aviso"></div>
+
       <div class="tabs">
         <button class="tab-btn active" id="btnFact" onclick="switchTab('facturacion')">FACTURACIÓN</button>
         <button class="tab-btn" id="btnCons" onclick="switchTab('consolidado')">CONSOLIDADO</button>
         <button class="tab-btn" id="btnCont" onclick="switchTab('contratos')">CONTRATOS</button>
+        <button class="tab-btn" id="btnTerc" onclick="switchTab('terceros')">TERCEROS</button>
       </div>
 
       <!-- Vista Facturación -->
@@ -313,6 +446,38 @@ app.get('/', (req, res) => {
         </table>
       </div>
 
+      <!-- Vista Terceros -->
+      <div id="viewTerceros" style="display:none;">
+        <div class="filters-container">
+          <input type="text" id="tBuscar" class="buscar" placeholder="Buscar por nombre o NIT..." oninput="filtrarTerceros()" />
+          <select id="tEmpresa" onchange="filtrarTerceros()"><option value="">EMPRESA (Todas)</option></select>
+          <select id="tAsignacion" onchange="filtrarTerceros()">
+            <option value="">COMERCIAL (Todos)</option>
+            <option value="SIN">SIN COMERCIAL</option>
+            <option value="CON">CON COMERCIAL</option>
+          </select>
+          <button class="btn-small" onclick="cargarTerceros(true)">↻ ACTUALIZAR DESDE SIIGO</button>
+        </div>
+        <datalist id="listaComerciales"></datalist>
+        <div class="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>NOMBRE / RAZÓN SOCIAL</th>
+                <th>NIT</th>
+                <th>TIPO</th>
+                <th>CIUDAD</th>
+                <th>EMAIL</th>
+                <th>TELÉFONO</th>
+                <th>EMPRESA</th>
+                <th>COMERCIAL ENCARGADO</th>
+              </tr>
+            </thead>
+            <tbody id="tablaTerceros"></tbody>
+          </table>
+        </div>
+      </div>
+
       <!-- Vista Contratos -->
       <div id="viewContratos" style="display:none;">
         <form class="form-container" onsubmit="guardarContrato(event)">
@@ -349,6 +514,26 @@ app.get('/', (req, res) => {
       <script>
         let facturasGlobales = [];
         let tabActual = 'facturacion';
+        let tercerosGlobales = [];
+        let recargarFacturas = false;
+
+        function esc(s) {
+          return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+
+        function mostrarAviso(resumen, etiqueta) {
+          const cont = document.getElementById('avisoEmpresas');
+          if (!resumen || !resumen.length) { cont.className = 'aviso'; cont.innerHTML = ''; return; }
+          const hayError = resumen.some(function (r) { return r.error; });
+          cont.className = 'aviso' + (hayError ? ' aviso-error' : '');
+          cont.innerHTML = '<b>' + esc(etiqueta) + ' →</b> ' + resumen.map(function (r) {
+            return '<b>' + esc(r.empresa) + ':</b> ' + (r.error ? '⚠ ' + esc(r.error) : r.cantidad + ' registros');
+          }).join(' &nbsp;|&nbsp; ');
+        }
+
+        function refrescarFacturasSiHaceFalta() {
+          if (recargarFacturas) { recargarFacturas = false; cargarFacturas(); } else { aplicarFiltros(); }
+        }
         const NOMBRES_MES = ['ENERO','FEBRERO','MARZO','ABRIL','MAYO','JUNIO','JULIO','AGOSTO','SEPTIEMBRE','OCTUBRE','NOVIEMBRE','DICIEMBRE'];
 
         function iniciarSelectoresFecha() {
@@ -369,14 +554,19 @@ app.get('/', (req, res) => {
           const ano = document.getElementById('selAno').value;
           const mes = document.getElementById('selMes').value;
           document.getElementById('tablaFacturas').innerHTML = '<tr><td colspan="12" style="text-align:center;">Consultando Siigo...</td></tr>';
+          let resumen = [];
           try {
             const res = await fetch('/api/facturas?ano=' + ano + (mes ? '&mes=' + mes : ''));
-            facturasGlobales = await res.json();
+            const data = await res.json();
+            facturasGlobales = data.facturas || [];
+            resumen = data.resumen || [];
           } catch (e) {
             facturasGlobales = [];
+            resumen = [{ empresa: 'Servidor', error: 'No se pudo consultar /api/facturas' }];
           }
+          mostrarAviso(resumen, 'Facturas');
           poblarFiltros(facturasGlobales);
-          if (tabActual === 'contratos') return;
+          if (tabActual === 'contratos' || tabActual === 'terceros') return;
           aplicarFiltros();
         }
 
@@ -385,21 +575,26 @@ app.get('/', (req, res) => {
           document.getElementById('btnFact').classList.toggle('active', tab === 'facturacion');
           document.getElementById('btnCons').classList.toggle('active', tab === 'consolidado');
           document.getElementById('btnCont').classList.toggle('active', tab === 'contratos');
+          document.getElementById('btnTerc').classList.toggle('active', tab === 'terceros');
 
           document.getElementById('viewFacturacion').style.display = tab === 'facturacion' ? 'block' : 'none';
           document.getElementById('viewConsolidado').style.display = tab === 'consolidado' ? 'block' : 'none';
           document.getElementById('viewContratos').style.display = tab === 'contratos' ? 'block' : 'none';
-          document.getElementById('barraFiltros').style.display = tab === 'contratos' ? 'none' : 'flex';
+          document.getElementById('viewTerceros').style.display = tab === 'terceros' ? 'block' : 'none';
+          document.getElementById('barraFiltros').style.display = (tab === 'contratos' || tab === 'terceros') ? 'none' : 'flex';
 
           if (tab === 'facturacion') {
             document.getElementById('kpiLabel').innerText = 'Valor Total Facturado (Bruto)';
-            aplicarFiltros();
+            refrescarFacturasSiHaceFalta();
           } else if (tab === 'consolidado') {
             document.getElementById('kpiLabel').innerText = 'Total Consolidado (Bruto)';
-            aplicarFiltros();
+            refrescarFacturasSiHaceFalta();
           } else if (tab === 'contratos') {
             document.getElementById('kpiLabel').innerText = 'Total Contratos Registrados';
             cargarContratos();
+          } else if (tab === 'terceros') {
+            document.getElementById('kpiLabel').innerText = 'Terceros listados';
+            cargarTerceros(false);
           }
         }
 
@@ -531,6 +726,87 @@ app.get('/', (req, res) => {
 
           e.target.reset();
           cargarContratos();
+        }
+
+        // ---------- Terceros ----------
+        async function cargarTerceros(refrescar) {
+          document.getElementById('tablaTerceros').innerHTML = '<tr><td colspan="8" style="text-align:center;">Cargando terceros desde Siigo (la primera vez puede tardar)...</td></tr>';
+          try {
+            const res = await fetch('/api/terceros' + (refrescar ? '?refrescar=1' : ''));
+            const data = await res.json();
+            tercerosGlobales = data.terceros || [];
+            mostrarAviso(data.resumen || [], 'Terceros');
+          } catch (e) {
+            tercerosGlobales = [];
+            mostrarAviso([{ empresa: 'Servidor', error: 'No se pudo consultar /api/terceros' }], 'Terceros');
+          }
+          const empresasT = [];
+          tercerosGlobales.forEach(function (t) { t.empresas.forEach(function (e) { empresasT.push(e); }); });
+          poblarSelect('tEmpresa', empresasT, 'EMPRESA (Todas)');
+          poblarComerciales();
+          filtrarTerceros();
+        }
+
+        function poblarComerciales() {
+          const nombres = {};
+          tercerosGlobales.forEach(function (t) { if (t.comercial) nombres[t.comercial] = true; });
+          facturasGlobales.forEach(function (f) { if (f.responsable && f.responsable !== 'N/A') nombres[f.responsable.toUpperCase()] = true; });
+          document.getElementById('listaComerciales').innerHTML = Object.keys(nombres).sort().map(function (n) {
+            return '<option value="' + esc(n) + '"></option>';
+          }).join('');
+        }
+
+        function filtrarTerceros() {
+          const q = document.getElementById('tBuscar').value.trim().toUpperCase();
+          const fEmp = document.getElementById('tEmpresa').value;
+          const fAsig = document.getElementById('tAsignacion').value;
+          const lista = tercerosGlobales.filter(function (t) {
+            return (!q || t.nombre.toUpperCase().indexOf(q) >= 0 || t.nit.indexOf(q) >= 0) &&
+                   (!fEmp || t.empresas.indexOf(fEmp) >= 0) &&
+                   (!fAsig || (fAsig === 'SIN' ? !t.comercial : !!t.comercial));
+          });
+
+          const LIMITE = 300;
+          let html = '';
+          lista.slice(0, LIMITE).forEach(function (t) {
+            html += '<tr>' +
+              '<td><b>' + esc(t.nombre) + '</b></td>' +
+              '<td>' + esc(t.nit) + '</td>' +
+              '<td>' + esc(t.tipo) + '</td>' +
+              '<td>' + esc(t.ciudad) + '</td>' +
+              '<td>' + esc(t.email) + '</td>' +
+              '<td>' + esc(t.telefono) + '</td>' +
+              '<td>' + esc(t.empresas.join(', ')) + '</td>' +
+              '<td><input type="text" class="inp-comercial" list="listaComerciales" data-nit="' + esc(t.nit) + '" value="' + esc(t.comercial || '') + '" placeholder="Asignar comercial..." onchange="asignarComercial(this)" /></td>' +
+              '</tr>';
+          });
+          if (lista.length > LIMITE) {
+            html += '<tr><td colspan="8" style="text-align:center;color:#64748b;">Mostrando los primeros ' + LIMITE + ' de ' + lista.length + '. Usa el buscador para acotar.</td></tr>';
+          }
+          document.getElementById('tablaTerceros').innerHTML = html || '<tr><td colspan="8" style="text-align:center;">Sin datos</td></tr>';
+          if (tabActual === 'terceros') document.getElementById('totalKPI').innerText = String(lista.length);
+        }
+
+        async function asignarComercial(input) {
+          const nit = input.getAttribute('data-nit');
+          const comercial = input.value.trim().toUpperCase();
+          input.value = comercial;
+          try {
+            const res = await fetch('/api/terceros/' + encodeURIComponent(nit) + '/comercial', {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ comercial: comercial })
+            });
+            if (!res.ok) throw new Error('fallo');
+            const t = tercerosGlobales.find(function (x) { return x.nit === nit; });
+            if (t) t.comercial = comercial;
+            input.style.borderColor = '#16a34a';
+            recargarFacturas = true;
+            poblarComerciales();
+          } catch (e) {
+            input.style.borderColor = '#dc2626';
+            alert('No se pudo guardar la asignación');
+          }
         }
 
         iniciarSelectoresFecha();
