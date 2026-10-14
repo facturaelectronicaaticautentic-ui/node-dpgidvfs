@@ -27,6 +27,12 @@ const pad = (n) => String(n).padStart(2, '0');
 const fs = require('fs');
 const path = require('path');
 const ARCHIVO_ASIGNACIONES = path.join(process.env.DATA_DIR || __dirname, 'asignaciones.json');
+// Comerciales disponibles para asignar a los terceros (se puede cambiar con la variable COMERCIALES del .env, separados por ;)
+const COMERCIALES = (process.env.COMERCIALES
+  ? process.env.COMERCIALES.split(';')
+  : ['NUBIA XIMENA FONSECA PEÑA', 'PABLO ALBERTO JIMÉNEZ RAMÍREZ']
+).map(n => n.trim().toUpperCase()).filter(Boolean);
+
 let asignaciones = {};
 try { asignaciones = JSON.parse(fs.readFileSync(ARCHIVO_ASIGNACIONES, 'utf8')); } catch (e) { asignaciones = {}; }
 function guardarAsignaciones() {
@@ -380,11 +386,16 @@ app.get('/api/terceros', async (req, res) => {
   res.json({ terceros: aplicarAsignaciones(base), resumen });
 });
 
+app.get('/api/comerciales', (req, res) => res.json(COMERCIALES));
+
 // PUT /api/terceros/:nit/comercial   body: { comercial: "NOMBRE" }  (vacío = quitar asignación)
 app.put('/api/terceros/:nit/comercial', (req, res) => {
   const nit = String(req.params.nit || '').trim();
   const comercial = String((req.body && req.body.comercial) || '').trim().toUpperCase();
   if (!nit) return res.status(400).json({ success: false, error: 'NIT requerido' });
+  if (comercial && !COMERCIALES.includes(comercial)) {
+    return res.status(400).json({ success: false, error: 'Comercial no válido' });
+  }
   if (comercial) asignaciones[nit] = comercial;
   else delete asignaciones[nit];
   guardarAsignaciones();
@@ -440,7 +451,7 @@ app.get('/', (req, res) => {
         .aviso.aviso-error { background: #fef2f2; color: #b91c1c; }
         .filters-container input.buscar { flex: 2; min-width: 220px; padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; }
         .btn-small { background: #002d5b; color: white; border: none; padding: 8px 14px; border-radius: 6px; font-weight: bold; font-size: 12px; cursor: pointer; }
-        .inp-comercial { width: 200px; padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 12px; }
+        .inp-comercial { width: 290px; padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 12px; }
       </style>
     </head>
     <body>
@@ -531,7 +542,6 @@ app.get('/', (req, res) => {
           </select>
           <button class="btn-small" onclick="cargarTerceros(true)">↻ ACTUALIZAR DESDE SIIGO</button>
         </div>
-        <datalist id="listaComerciales"></datalist>
         <div class="table-container">
           <table>
             <thead>
@@ -588,6 +598,7 @@ app.get('/', (req, res) => {
         let facturasGlobales = [];
         let tabActual = 'facturacion';
         let tercerosGlobales = [];
+        let comerciales = [];
         let recargarFacturas = false;
 
         function esc(s) {
@@ -806,6 +817,10 @@ app.get('/', (req, res) => {
         async function cargarTerceros(refrescar) {
           document.getElementById('tablaTerceros').innerHTML = '<tr><td colspan="8" style="text-align:center;">Cargando terceros desde Siigo (la primera vez puede tardar)...</td></tr>';
           try {
+            const rc = await fetch('/api/comerciales');
+            comerciales = await rc.json();
+          } catch (e) { comerciales = []; }
+          try {
             const res = await fetch('/api/terceros' + (refrescar ? '?refrescar=1' : ''));
             const data = await res.json();
             tercerosGlobales = data.terceros || [];
@@ -821,13 +836,24 @@ app.get('/', (req, res) => {
           filtrarTerceros();
         }
 
+        // Filtro de la pestaña: Todos / Sin comercial / Con comercial / cada comercial
         function poblarComerciales() {
-          const nombres = {};
-          tercerosGlobales.forEach(function (t) { if (t.comercial) nombres[t.comercial] = true; });
-          facturasGlobales.forEach(function (f) { if (f.responsable && f.responsable !== 'N/A') nombres[f.responsable.toUpperCase()] = true; });
-          document.getElementById('listaComerciales').innerHTML = Object.keys(nombres).sort().map(function (n) {
-            return '<option value="' + esc(n) + '"></option>';
-          }).join('');
+          const sel = document.getElementById('tAsignacion');
+          const previo = sel.value;
+          sel.innerHTML = '<option value="">COMERCIAL (Todos)</option><option value="SIN">SIN COMERCIAL</option><option value="CON">CON COMERCIAL</option>' +
+            comerciales.map(function (n) { return '<option value="' + esc(n) + '">' + esc(n) + '</option>'; }).join('');
+          sel.value = previo;
+        }
+
+        // Lista desplegable por fila con los comerciales disponibles
+        function selectComercial(t) {
+          const opciones = comerciales.slice();
+          if (t.comercial && opciones.indexOf(t.comercial) < 0) opciones.push(t.comercial);
+          return '<select class="inp-comercial" data-nit="' + esc(t.nit) + '" onchange="asignarComercial(this)">' +
+            '<option value="">— SIN ASIGNAR —</option>' +
+            opciones.map(function (n) {
+              return '<option value="' + esc(n) + '"' + (n === t.comercial ? ' selected' : '') + '>' + esc(n) + '</option>';
+            }).join('') + '</select>';
         }
 
         function filtrarTerceros() {
@@ -837,7 +863,7 @@ app.get('/', (req, res) => {
           const lista = tercerosGlobales.filter(function (t) {
             return (!q || t.nombre.toUpperCase().indexOf(q) >= 0 || t.nit.indexOf(q) >= 0) &&
                    (!fEmp || t.empresas.indexOf(fEmp) >= 0) &&
-                   (!fAsig || (fAsig === 'SIN' ? !t.comercial : !!t.comercial));
+                   (!fAsig || (fAsig === 'SIN' ? !t.comercial : fAsig === 'CON' ? !!t.comercial : t.comercial === fAsig));
           });
 
           const LIMITE = 300;
@@ -851,7 +877,7 @@ app.get('/', (req, res) => {
               '<td>' + esc(t.email) + '</td>' +
               '<td>' + esc(t.telefono) + '</td>' +
               '<td>' + esc(t.empresas.join(', ')) + '</td>' +
-              '<td><input type="text" class="inp-comercial" list="listaComerciales" data-nit="' + esc(t.nit) + '" value="' + esc(t.comercial || '') + '" placeholder="Asignar comercial..." onchange="asignarComercial(this)" /></td>' +
+              '<td>' + selectComercial(t) + '</td>' +
               '</tr>';
           });
           if (lista.length > LIMITE) {
