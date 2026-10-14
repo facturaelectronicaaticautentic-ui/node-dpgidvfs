@@ -287,13 +287,13 @@ function rangoFechas(ano, mes) {
   return { desde: `${ano}-01-01`, hasta: `${ano}-12-31` };
 }
 
-async function facturasDeEmpresa(emp, desde, hasta) {
+async function facturasDeEmpresa(emp, desde, hasta, refrescar) {
   const token = await getToken(emp);
   if (!token) return [];
   const claveCache = `${emp.id}|${desde}|${hasta}`;
   let facturas;
   const previo = facturasCache.get(claveCache);
-  if (previo && Date.now() - previo.ts < 2 * 60 * 1000) {
+  if (!refrescar && previo && Date.now() - previo.ts < 2 * 60 * 1000) {
     facturas = previo.data;
   } else {
     facturas = await traerFacturas(token, desde, hasta);
@@ -319,6 +319,7 @@ async function facturasDeEmpresa(emp, desde, hasta) {
       numMes,
       ano: y,
       numero: f.name || f.id,
+      consecutivo: Number(f.number) || Number((String(f.name || '').match(/(\d+)\s*$/) || [])[1]) || 0,
       fecha: f.date,
       vencimiento: f.payments && f.payments[0] ? f.payments[0].due_date || '-' : '-',
       condicion: saldo > 0 ? 'PENDIENTE' : 'PAGADO',
@@ -339,8 +340,12 @@ async function facturasDeEmpresa(emp, desde, hasta) {
 }
 
 // GET /api/facturas?ano=2026&mes=10   (mes opcional: 1-12; sin mes trae todo el año)
+// GET /api/facturas?ano=2026&mes=10             -> todas las ventas del periodo
+// GET /api/facturas?...&refrescar=1&solo=wompi  -> vuelve a leer Siigo (sin caché) y devuelve solo las ventas Wompi
 app.get('/api/facturas', async (req, res) => {
   await asignacionesListas;
+  const refrescar = !!req.query.refrescar;
+  const soloWompi = req.query.solo === 'wompi';
   const ano = parseInt(req.query.ano, 10) || new Date().getFullYear();
   const mes = parseInt(req.query.mes, 10) || null;
   const { desde, hasta } = rangoFechas(ano, mes);
@@ -360,7 +365,7 @@ app.get('/api/facturas', async (req, res) => {
       return { empresa: emp.nombre, facturas: [], error: `Faltan credenciales (EMPRESA${emp.id}_USER / EMPRESA${emp.id}_KEY) en el .env` };
     }
     try {
-      const facturas = await facturasDeEmpresa(emp, desde, hasta);
+      const facturas = await facturasDeEmpresa(emp, desde, hasta, refrescar);
       return { empresa: emp.nombre, facturas, error: null, nota: facturas.nota || '' };
     } catch (e) {
       const error = describirError(e);
@@ -369,10 +374,13 @@ app.get('/api/facturas', async (req, res) => {
     }
   }));
 
-  const facturas = resultados.flatMap(r => r.facturas).sort((a, b) => String(b.fecha).localeCompare(String(a.fecha)));
+  // Orden: consecutivo de factura de mayor a menor
+  const facturas = resultados.flatMap(r => r.facturas)
+    .filter(f => !soloWompi || f.esWompi)
+    .sort((a, b) => (b.consecutivo - a.consecutivo) || String(b.fecha).localeCompare(String(a.fecha)));
   res.json({
     facturas,
-    resumen: resultados.map(r => ({ empresa: r.empresa, cantidad: r.facturas.length, error: r.error, nota: r.nota || '' }))
+    resumen: resultados.map(r => ({ empresa: r.empresa, cantidad: r.facturas.filter(f => !soloWompi || f.esWompi).length, error: r.error, nota: r.nota || '' }))
   });
 });
 
@@ -596,9 +604,12 @@ app.get('/', (req, res) => {
 
       <!-- Vista Ventas Wompi -->
       <div id="viewWompi" style="display:none;">
-        <div class="aviso" style="background:#eff6ff;color:#1e40af;">
-          Ventas cuya forma de pago corresponde a Wompi (contrapartida 138095). Si falta alguna o sobra otra, revisa las
-          <a href="/api/formas-pago" target="_blank">formas de pago de Siigo</a>.
+        <div class="aviso" style="background:#eff6ff;color:#1e40af;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+          <span>
+            Ventas cuya forma de pago corresponde a Wompi (contrapartida 138095). Si falta alguna o sobra otra, revisa las
+            <a href="/api/formas-pago" target="_blank">formas de pago de Siigo</a>.
+          </span>
+          <button class="btn-small" onclick="cargarFacturas(true)">🔍 BUSCAR / ACTUALIZAR WOMPI</button>
         </div>
         <div class="table-container">
           <table>
@@ -754,23 +765,34 @@ app.get('/', (req, res) => {
           selMes.value = String(hoy.getMonth() + 1);
         }
 
-        async function cargarFacturas() {
+        // soloWompi = true: vuelve a leer Siigo (sin caché) y reemplaza únicamente las ventas Wompi
+        async function cargarFacturas(soloWompi) {
           const ano = document.getElementById('selAno').value;
           const mes = document.getElementById('selMes').value;
           const cargando = '<tr><td colspan="14" style="text-align:center;">Consultando Siigo...</td></tr>';
-          document.getElementById('tablaFacturas').innerHTML = cargando;
+          if (!soloWompi) document.getElementById('tablaFacturas').innerHTML = cargando;
           document.getElementById('tablaWompi').innerHTML = cargando;
           let resumen = [];
           try {
-            const res = await fetch('/api/facturas?ano=' + ano + (mes ? '&mes=' + mes : ''));
+            const url = '/api/facturas?ano=' + ano + (mes ? '&mes=' + mes : '') + (soloWompi ? '&refrescar=1&solo=wompi' : '');
+            const res = await fetch(url);
             const data = await res.json();
-            facturasGlobales = data.facturas || [];
+            const nuevas = data.facturas || [];
             resumen = data.resumen || [];
+            if (soloWompi) {
+              // Se reemplazan solo las ventas Wompi; si una empresa falló, se conservan las que ya había de esa empresa
+              const conError = resumen.filter(function (r) { return r.error; }).map(function (r) { return r.empresa; });
+              facturasGlobales = facturasGlobales.filter(function (f) {
+                return !f.esWompi || conError.indexOf(f.empresa) >= 0;
+              }).concat(nuevas);
+            } else {
+              facturasGlobales = nuevas;
+            }
           } catch (e) {
-            facturasGlobales = [];
+            if (!soloWompi) facturasGlobales = [];
             resumen = [{ empresa: 'Servidor', error: 'No se pudo consultar /api/facturas' }];
           }
-          mostrarAviso(resumen, 'Facturas');
+          mostrarAviso(resumen, soloWompi ? 'Ventas Wompi' : 'Facturas');
           poblarFiltros(facturasGlobales);
           if (tabActual === 'contratos' || tabActual === 'terceros') return;
           aplicarFiltros();
@@ -840,8 +862,8 @@ app.get('/', (req, res) => {
           });
 
           // Facturación y Consolidado muestran todo menos las ventas Wompi; esas van en su pestaña
-          const normales = filtradas.filter(function (f) { return !f.esWompi; });
-          const wompi = filtradas.filter(function (f) { return f.esWompi; });
+          const normales = filtradas.filter(function (f) { return !f.esWompi; }).sort(ordenarFacturas);
+          const wompi = filtradas.filter(function (f) { return f.esWompi; }).sort(ordenarFacturas);
 
           if (tabActual === 'facturacion') {
             renderFacturas(normales, 'tablaFacturas');
@@ -853,6 +875,13 @@ app.get('/', (req, res) => {
         }
 
         function fmt(n) { return '$ ' + Number(n || 0).toLocaleString('es-CO'); }
+
+        // Facturas de mayor a menor consecutivo
+        function ordenarFacturas(a, b) {
+          return (b.consecutivo || 0) - (a.consecutivo || 0) ||
+                 String(b.fecha).localeCompare(String(a.fecha)) ||
+                 String(a.empresa).localeCompare(String(b.empresa));
+        }
 
         function renderFacturas(data, destino) {
           let html = '';
