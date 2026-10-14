@@ -57,29 +57,57 @@ async function getToken(empresa) {
   if (!empresa.user || !empresa.key) return null;
   const c = tokens.get(empresa.id);
   if (c && c.exp > Date.now()) return c.token;
-  const res = await siigoClient.post('/auth', {
+  const res = await conReintento('auth:' + empresa.id, () => siigoClient.post('/auth', {
     username: empresa.user,
     access_key: empresa.key
-  });
+  }));
   tokens.set(empresa.id, { token: res.data.access_token, exp: Date.now() + 23 * 60 * 60 * 1000 });
   return res.data.access_token;
 }
 
-// GET con reintentos ante límite de velocidad (429) o errores 5xx
-async function siigoGet(url, params, token, intentos = 3) {
+// Siigo limita las llamadas por minuto: se espacian por cuenta y, si responde 429,
+// se espera el tiempo que Siigo indica ("Try again in N seconds") antes de reintentar.
+const siguienteTurno = new Map();
+async function esperarTurno(clave) {
+  const turno = Math.max(Date.now(), siguienteTurno.get(clave) || 0);
+  siguienteTurno.set(clave, turno + 700);
+  const espera = turno - Date.now();
+  if (espera > 0) await sleep(espera);
+}
+
+function segundosDeEspera(e) {
+  const h = e.response && e.response.headers && e.response.headers['retry-after'];
+  if (h && !isNaN(Number(h))) return Number(h);
+  const d = e.response && e.response.data;
+  const txt = typeof d === 'string' ? d : JSON.stringify(d || '');
+  const m = txt.match(/in (\d+) seconds/i);
+  return m ? Number(m[1]) : 20;
+}
+
+async function conReintento(clave, fn, intentos = 4) {
   for (let i = 0; i < intentos; i++) {
+    await esperarTurno(clave);
     try {
-      const r = await siigoClient.get(url, { params, headers: { Authorization: token } });
-      return r.data;
+      return await fn();
     } catch (e) {
       const status = e.response && e.response.status;
-      if ((status === 429 || status >= 500) && i < intentos - 1) {
-        await sleep(1500 * (i + 1));
+      if (i < intentos - 1 && (status === 429 || status >= 500)) {
+        const seg = status === 429 ? Math.min(segundosDeEspera(e) + 2, 70) : 2 * (i + 1);
+        console.warn(`[Siigo] HTTP ${status}, reintentando en ${seg}s`);
+        siguienteTurno.set(clave, Date.now() + seg * 1000);
+        await sleep(seg * 1000);
         continue;
       }
       throw e;
     }
   }
+}
+
+async function siigoGet(url, params, token) {
+  return conReintento(token, async () => {
+    const r = await siigoClient.get(url, { params, headers: { Authorization: token } });
+    return r.data;
+  });
 }
 
 // ---------- Facturas: trae TODAS las páginas del rango pedido ----------
@@ -119,19 +147,50 @@ function nombreDeCliente(c) {
   return '';
 }
 
+// Lista completa de clientes por empresa (pocas llamadas, de 100 en 100), cacheada 30 min.
+// Sirve tanto para los nombres en facturas como para la pestaña Terceros.
+const clientesRaw = new Map();      // emp.id -> { ts, lista }
+const clientesEnCurso = new Map();  // emp.id -> Promise (evita cargas duplicadas)
+const facturasCache = new Map();    // "empresa|desde|hasta" -> { ts, data }
+
+async function obtenerClientesRaw(emp, token, forzar = false) {
+  const c = clientesRaw.get(emp.id);
+  if (!forzar && c && Date.now() - c.ts < 30 * 60 * 1000) return c.lista;
+  if (clientesEnCurso.has(emp.id)) return clientesEnCurso.get(emp.id);
+  const p = (async () => {
+    const lista = [];
+    let page = 1;
+    let total = Infinity;
+    while (lista.length < total) {
+      const data = await siigoGet('/v1/customers', { page, page_size: 100 }, token);
+      const results = data.results || [];
+      total = data.pagination && data.pagination.total_results != null ? data.pagination.total_results : results.length;
+      lista.push(...results);
+      if (results.length === 0) break;
+      page++;
+    }
+    lista.forEach(c => {
+      const n = nombreDeCliente(c);
+      if (n && c.id) clientesCache.set(`${emp.id}:${c.id}`, n);
+    });
+    clientesRaw.set(emp.id, { ts: Date.now(), lista });
+    return lista;
+  })();
+  clientesEnCurso.set(emp.id, p);
+  try { return await p; } finally { clientesEnCurso.delete(emp.id); }
+}
+
+// Devuelve un texto de aviso si no se pudieron cargar los nombres (no rompe las facturas)
 async function resolverClientes(emp, token, facturas) {
-  const ids = [...new Set(facturas.map(f => f.customer && f.customer.id).filter(Boolean))];
-  const pendientes = ids.filter(id => !clientesCache.has(`${emp.id}:${id}`));
-  for (let i = 0; i < pendientes.length; i += 5) {
-    await Promise.all(pendientes.slice(i, i + 5).map(async (id) => {
-      try {
-        const c = await siigoGet(`/v1/customers/${id}`, {}, token);
-        const nombre = nombreDeCliente(c);
-        if (nombre) clientesCache.set(`${emp.id}:${id}`, nombre);
-      } catch (e) {
-        console.error(`[${emp.nombre}] No se pudo leer el cliente ${id}:`, e.response ? e.response.status : e.message);
-      }
-    }));
+  const faltan = facturas.some(f => f.customer && f.customer.id && !clientesCache.has(`${emp.id}:${f.customer.id}`));
+  if (!faltan) return '';
+  try {
+    await obtenerClientesRaw(emp, token);
+    return '';
+  } catch (e) {
+    const msg = describirError(e);
+    console.error(`[${emp.nombre}] No se pudieron cargar los clientes:`, msg);
+    return `No se pudieron cargar los nombres de clientes (${msg}); se muestra el NIT. Recarga en un minuto.`;
   }
 }
 
@@ -153,10 +212,18 @@ function rangoFechas(ano, mes) {
 async function facturasDeEmpresa(emp, desde, hasta) {
   const token = await getToken(emp);
   if (!token) return [];
-  const facturas = await traerFacturas(token, desde, hasta);
-  await resolverClientes(emp, token, facturas);
+  const claveCache = `${emp.id}|${desde}|${hasta}`;
+  let facturas;
+  const previo = facturasCache.get(claveCache);
+  if (previo && Date.now() - previo.ts < 2 * 60 * 1000) {
+    facturas = previo.data;
+  } else {
+    facturas = await traerFacturas(token, desde, hasta);
+    facturasCache.set(claveCache, { ts: Date.now(), data: facturas });
+  }
+  const nota = await resolverClientes(emp, token, facturas);
 
-  return facturas.map(f => {
+  const lista = facturas.map(f => {
     const c = f.customer || {};
     // Se lee año/mes directo del texto "YYYY-MM-DD" para evitar el desfase de zona horaria
     const [y, m] = String(f.date).split('-');
@@ -185,6 +252,8 @@ async function facturasDeEmpresa(emp, desde, hasta) {
       empresa: emp.nombre
     };
   });
+  lista.nota = nota;
+  return lista;
 }
 
 // GET /api/facturas?ano=2026&mes=10   (mes opcional: 1-12; sin mes trae todo el año)
@@ -209,7 +278,7 @@ app.get('/api/facturas', async (req, res) => {
     }
     try {
       const facturas = await facturasDeEmpresa(emp, desde, hasta);
-      return { empresa: emp.nombre, facturas, error: null };
+      return { empresa: emp.nombre, facturas, error: null, nota: facturas.nota || '' };
     } catch (e) {
       const error = describirError(e);
       console.error(`[${emp.nombre}] Error consultando Siigo:`, error);
@@ -220,7 +289,7 @@ app.get('/api/facturas', async (req, res) => {
   const facturas = resultados.flatMap(r => r.facturas).sort((a, b) => String(b.fecha).localeCompare(String(a.fecha)));
   res.json({
     facturas,
-    resumen: resultados.map(r => ({ empresa: r.empresa, cantidad: r.facturas.length, error: r.error }))
+    resumen: resultados.map(r => ({ empresa: r.empresa, cantidad: r.facturas.length, error: r.error, nota: r.nota || '' }))
   });
 });
 
@@ -244,21 +313,11 @@ function mapearTercero(emp, c) {
   };
 }
 
-async function traerTerceros(emp) {
+async function traerTerceros(emp, forzar) {
   const token = await getToken(emp);
   if (!token) return [];
-  const todos = [];
-  let page = 1;
-  let total = Infinity;
-  while (todos.length < total) {
-    const data = await siigoGet('/v1/customers', { page, page_size: 100 }, token);
-    const results = data.results || [];
-    total = data.pagination && data.pagination.total_results != null ? data.pagination.total_results : results.length;
-    todos.push(...results);
-    if (results.length === 0) break;
-    page++;
-  }
-  return todos.map(c => mapearTercero(emp, c));
+  const lista = await obtenerClientesRaw(emp, token, forzar);
+  return lista.map(c => mapearTercero(emp, c));
 }
 
 function aplicarAsignaciones(base) {
@@ -278,7 +337,7 @@ app.get('/api/terceros', async (req, res) => {
       return { empresa: emp.nombre, terceros: [], error: `Faltan credenciales (EMPRESA${emp.id}_USER / EMPRESA${emp.id}_KEY) en el .env` };
     }
     try {
-      return { empresa: emp.nombre, terceros: await traerTerceros(emp), error: null };
+      return { empresa: emp.nombre, terceros: await traerTerceros(emp, !!req.query.refrescar), error: null };
     } catch (e) {
       const error = describirError(e);
       console.error(`[${emp.nombre}] Error leyendo terceros:`, error);
@@ -524,10 +583,10 @@ app.get('/', (req, res) => {
         function mostrarAviso(resumen, etiqueta) {
           const cont = document.getElementById('avisoEmpresas');
           if (!resumen || !resumen.length) { cont.className = 'aviso'; cont.innerHTML = ''; return; }
-          const hayError = resumen.some(function (r) { return r.error; });
+          const hayError = resumen.some(function (r) { return r.error || r.nota; });
           cont.className = 'aviso' + (hayError ? ' aviso-error' : '');
           cont.innerHTML = '<b>' + esc(etiqueta) + ' →</b> ' + resumen.map(function (r) {
-            return '<b>' + esc(r.empresa) + ':</b> ' + (r.error ? '⚠ ' + esc(r.error) : r.cantidad + ' registros');
+            return '<b>' + esc(r.empresa) + ':</b> ' + (r.error ? '⚠ ' + esc(r.error) : r.cantidad + ' registros' + (r.nota ? ' (⚠ ' + esc(r.nota) + ')' : ''));
           }).join(' &nbsp;|&nbsp; ');
         }
 
