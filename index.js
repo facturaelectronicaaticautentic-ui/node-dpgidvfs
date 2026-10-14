@@ -40,6 +40,56 @@ function guardarAsignaciones() {
   catch (e) { console.error('No se pudo guardar asignaciones.json:', e.message); }
 }
 
+// ---------- Almacenamiento permanente (Upstash Redis, gratis) ----------
+// Si defines UPSTASH_REDIS_REST_URL y UPSTASH_REDIS_REST_TOKEN en el .env, las asignaciones
+// se guardan allí y sobreviven a reinicios y despliegues. Sin eso se usa solo el archivo local.
+const UPSTASH_URL = (process.env.UPSTASH_REDIS_REST_URL || '').replace(/\/$/, '');
+const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
+const ALMACEN_REMOTO = !!(UPSTASH_URL && UPSTASH_TOKEN);
+const CLAVE_ASIGNACIONES = 'autentic:asignaciones';
+
+async function redis(comando) {
+  const r = await axios.post(UPSTASH_URL, comando, {
+    headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
+    timeout: 10000
+  });
+  if (r.data && r.data.error) throw new Error(r.data.error);
+  return r.data.result;
+}
+
+async function cargarAsignaciones() {
+  if (!ALMACEN_REMOTO) return;
+  try {
+    const r = await redis(['HGETALL', CLAVE_ASIGNACIONES]);
+    const remoto = {};
+    if (Array.isArray(r)) {
+      for (let i = 0; i < r.length; i += 2) remoto[r[i]] = r[i + 1];
+    } else if (r && typeof r === 'object') {
+      Object.assign(remoto, r);
+    }
+    // Lo que ya estaba en el archivo local y aún no está en la nube se sube una sola vez
+    for (const [nit, com] of Object.entries(asignaciones)) {
+      if (!remoto[nit]) {
+        try { await redis(['HSET', CLAVE_ASIGNACIONES, nit, com]); remoto[nit] = com; } catch (e) { /* se reintenta en el próximo arranque */ }
+      }
+    }
+    asignaciones = remoto;
+    console.log(`Asignaciones cargadas desde Upstash: ${Object.keys(remoto).length}`);
+  } catch (e) {
+    console.error('No se pudieron leer las asignaciones de Upstash:', e.message);
+  }
+}
+const asignacionesListas = cargarAsignaciones();
+
+async function persistirAsignacion(nit, comercial) {
+  if (comercial) asignaciones[nit] = comercial;
+  else delete asignaciones[nit];
+  guardarAsignaciones();
+  if (ALMACEN_REMOTO) {
+    await redis(comercial ? ['HSET', CLAVE_ASIGNACIONES, nit, comercial] : ['HDEL', CLAVE_ASIGNACIONES, nit]);
+  }
+}
+
 function describirError(e) {
   if (e.response) {
     const d = e.response.data;
@@ -277,6 +327,7 @@ async function facturasDeEmpresa(emp, desde, hasta) {
 
 // GET /api/facturas?ano=2026&mes=10   (mes opcional: 1-12; sin mes trae todo el año)
 app.get('/api/facturas', async (req, res) => {
+  await asignacionesListas;
   const ano = parseInt(req.query.ano, 10) || new Date().getFullYear();
   const mes = parseInt(req.query.mes, 10) || null;
   const { desde, hasta } = rangoFechas(ano, mes);
@@ -346,9 +397,11 @@ function aplicarAsignaciones(base) {
 // GET /api/terceros            (usa caché de 10 min)
 // GET /api/terceros?refrescar=1 (vuelve a leer Siigo)
 app.get('/api/terceros', async (req, res) => {
+  await asignacionesListas;
+  const almacenamiento = ALMACEN_REMOTO ? 'remoto' : 'archivo';
   const vigente = Date.now() - tercerosCache.ts < 10 * 60 * 1000;
   if (!req.query.refrescar && vigente) {
-    return res.json({ terceros: aplicarAsignaciones(tercerosCache.base), resumen: tercerosCache.resumen });
+    return res.json({ terceros: aplicarAsignaciones(tercerosCache.base), resumen: tercerosCache.resumen, almacenamiento });
   }
 
   const resultados = await Promise.all(empresas.map(async (emp) => {
@@ -383,23 +436,27 @@ app.get('/api/terceros', async (req, res) => {
 
   // Solo se cachea si ambas empresas respondieron bien
   tercerosCache = { ts: resumen.some(r => r.error) ? 0 : Date.now(), base, resumen };
-  res.json({ terceros: aplicarAsignaciones(base), resumen });
+  res.json({ terceros: aplicarAsignaciones(base), resumen, almacenamiento });
 });
 
 app.get('/api/comerciales', (req, res) => res.json(COMERCIALES));
 
 // PUT /api/terceros/:nit/comercial   body: { comercial: "NOMBRE" }  (vacío = quitar asignación)
-app.put('/api/terceros/:nit/comercial', (req, res) => {
+app.put('/api/terceros/:nit/comercial', async (req, res) => {
+  await asignacionesListas;
   const nit = String(req.params.nit || '').trim();
   const comercial = String((req.body && req.body.comercial) || '').trim().toUpperCase();
   if (!nit) return res.status(400).json({ success: false, error: 'NIT requerido' });
   if (comercial && !COMERCIALES.includes(comercial)) {
     return res.status(400).json({ success: false, error: 'Comercial no válido' });
   }
-  if (comercial) asignaciones[nit] = comercial;
-  else delete asignaciones[nit];
-  guardarAsignaciones();
-  res.json({ success: true });
+  try {
+    await persistirAsignacion(nit, comercial);
+    res.json({ success: true });
+  } catch (e) {
+    console.error('No se pudo guardar la asignación:', e.message);
+    res.status(500).json({ success: false, error: 'No se pudo guardar la asignación' });
+  }
 });
 
 // Endpoints para Contratos
@@ -825,6 +882,11 @@ app.get('/', (req, res) => {
             const data = await res.json();
             tercerosGlobales = data.terceros || [];
             mostrarAviso(data.resumen || [], 'Terceros');
+            if (data.almacenamiento === 'archivo') {
+              const cont = document.getElementById('avisoEmpresas');
+              cont.className = 'aviso aviso-error';
+              cont.innerHTML += '<br>⚠ Las asignaciones se guardan en un archivo local y se pierden si el hosting reinicia o se vuelve a desplegar. Configura UPSTASH_REDIS_REST_URL y UPSTASH_REDIS_REST_TOKEN en el .env para que sean permanentes.';
+            }
           } catch (e) {
             tercerosGlobales = [];
             mostrarAviso([{ empresa: 'Servidor', error: 'No se pudo consultar /api/terceros' }], 'Terceros');
