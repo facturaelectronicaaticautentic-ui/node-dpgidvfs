@@ -194,6 +194,17 @@ async function resolverClientes(emp, token, facturas) {
   }
 }
 
+// Toma de las observaciones el periodo de consumo.
+// Ej: "Consumo mes de abril y mayo 2026. Contrato 12" -> "ABRIL Y MAYO 2026"
+function extraerConsumo(obs) {
+  if (!obs) return '-';
+  const texto = String(obs).replace(/\s+/g, ' ').trim();
+  const m = texto.match(/consumos?\b\s*(?:del?\s+)?(?:los\s+)?(?:mes(?:es)?\b\s*)?(?:de(?:l)?\s+)?([^.;|]*)/i);
+  if (!m) return '-';
+  const periodo = m[1].trim().replace(/[,\s]+$/, '');
+  return periodo ? periodo.slice(0, 80).toUpperCase() : '-';
+}
+
 function valorBruto(f) {
   if (Array.isArray(f.items) && f.items.length > 0) {
     return f.items.reduce((acc, it) => acc + (Number(it.price) || 0) * (Number(it.quantity) || 0) - (Number(it.discount) || 0), 0);
@@ -246,6 +257,8 @@ async function facturasDeEmpresa(emp, desde, hasta) {
       condicion: saldo > 0 ? 'PENDIENTE' : 'PAGADO',
       fechaPago: saldo === 0 ? f.date : '-',
       responsable: asignaciones[String(nit).trim()] || (seller ? (seller.name || `${seller.first_name || ''} ${seller.last_name || ''}`.trim() || String(seller)) : 'N/A'),
+      consumo: extraerConsumo(f.observations),
+      observaciones: f.observations || '',
       valor: valorBruto(f),
       total: Number(f.total) || 0,
       saldo,
@@ -465,6 +478,7 @@ app.get('/', (req, res) => {
               <th>CLIENTE</th>
               <th>NIT</th>
               <th>MES</th>
+              <th>CONSUMO MES</th>
               <th>No FRA</th>
               <th>FECHA</th>
               <th>VENCIMIENTO</th>
@@ -612,7 +626,7 @@ app.get('/', (req, res) => {
         async function cargarFacturas() {
           const ano = document.getElementById('selAno').value;
           const mes = document.getElementById('selMes').value;
-          document.getElementById('tablaFacturas').innerHTML = '<tr><td colspan="12" style="text-align:center;">Consultando Siigo...</td></tr>';
+          document.getElementById('tablaFacturas').innerHTML = '<tr><td colspan="13" style="text-align:center;">Consultando Siigo...</td></tr>';
           let resumen = [];
           try {
             const res = await fetch('/api/facturas?ano=' + ano + (mes ? '&mes=' + mes : ''));
@@ -706,6 +720,7 @@ app.get('/', (req, res) => {
               '<td><b>' + f.cliente + '</b></td>' +
               '<td>' + (f.nit || '-') + '</td>' +
               '<td>' + f.mes + '</td>' +
+              '<td title="' + esc(f.observaciones || '') + '">' + esc(f.consumo || '-') + '</td>' +
               '<td>' + f.numero + '</td>' +
               '<td>' + f.fecha + '</td>' +
               '<td>' + f.vencimiento + '</td>' +
@@ -717,7 +732,7 @@ app.get('/', (req, res) => {
               '<td>' + f.empresa + '</td>' +
               '</tr>';
           });
-          document.getElementById('tablaFacturas').innerHTML = html || '<tr><td colspan="12" style="text-align:center;">Sin datos</td></tr>';
+          document.getElementById('tablaFacturas').innerHTML = html || '<tr><td colspan="13" style="text-align:center;">Sin datos</td></tr>';
           document.getElementById('totalKPI').innerText = fmt(total);
         }
 
