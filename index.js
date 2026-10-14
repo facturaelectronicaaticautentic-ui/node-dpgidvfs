@@ -33,6 +33,17 @@ const COMERCIALES = (process.env.COMERCIALES
   : ['NUBIA XIMENA FONSECA PEÑA', 'PABLO ALBERTO JIMÉNEZ RAMÍREZ']
 ).map(n => n.trim().toUpperCase()).filter(Boolean);
 
+// Formas de pago de Siigo que se consideran "ventas Wompi" (las que contabilizan en la cuenta 138095).
+// Siigo no entrega la contrapartida contable en la API, así que se clasifica por la forma de pago de la factura.
+// Cada elemento puede ser el NOMBRE (basta con que lo contenga) o el ID de la forma de pago.
+// Se cambia con WOMPI_FORMAS_PAGO en el .env, separado por ;  (por defecto: cualquier forma de pago que contenga "WOMPI")
+const WOMPI_FORMAS = (process.env.WOMPI_FORMAS_PAGO || 'WOMPI').split(';').map(s => s.trim().toUpperCase()).filter(Boolean);
+function esPagoWompi(p) {
+  const id = String(p.id == null ? '' : p.id).toUpperCase();
+  const nombre = String(p.name || '').toUpperCase();
+  return WOMPI_FORMAS.some(w => w === id || (nombre !== '' && nombre.includes(w)));
+}
+
 let asignaciones = {};
 try { asignaciones = JSON.parse(fs.readFileSync(ARCHIVO_ASIGNACIONES, 'utf8')); } catch (e) { asignaciones = {}; }
 function guardarAsignaciones() {
@@ -313,6 +324,8 @@ async function facturasDeEmpresa(emp, desde, hasta) {
       condicion: saldo > 0 ? 'PENDIENTE' : 'PAGADO',
       fechaPago: saldo === 0 ? f.date : '-',
       responsable: asignaciones[String(nit).trim()] || (seller ? (seller.name || `${seller.first_name || ''} ${seller.last_name || ''}`.trim() || String(seller)) : 'N/A'),
+      formaPago: (f.payments || []).map(p => p.name || p.id).join(', ') || '-',
+      esWompi: (f.payments || []).some(esPagoWompi),
       consumo: extraerConsumo(f.observations),
       observaciones: f.observations || '',
       valor: valorBruto(f),
@@ -459,6 +472,23 @@ app.put('/api/terceros/:nit/comercial', async (req, res) => {
   }
 });
 
+// Muestra las formas de pago de venta de cada empresa en Siigo y cuáles se están tomando como Wompi
+app.get('/api/formas-pago', async (req, res) => {
+  const salida = [];
+  await Promise.all(empresas.map(async (emp) => {
+    if (!emp.user || !emp.key) { salida.push({ empresa: emp.nombre, error: 'Faltan credenciales' }); return; }
+    try {
+      const token = await getToken(emp);
+      const data = await siigoGet('/v1/payment-types', { document_type: 'FV' }, token);
+      const lista = Array.isArray(data) ? data : (data.results || []);
+      lista.forEach(p => salida.push({ empresa: emp.nombre, id: p.id, nombre: p.name, activa: p.active, tomadaComoWompi: esPagoWompi(p) }));
+    } catch (e) {
+      salida.push({ empresa: emp.nombre, error: describirError(e) });
+    }
+  }));
+  res.type('json').send(JSON.stringify(salida, null, 2));
+});
+
 // Endpoints para Contratos
 app.get('/api/contratos', (req, res) => res.json(contratosBD));
 app.post('/api/contratos', (req, res) => {
@@ -533,6 +563,7 @@ app.get('/', (req, res) => {
 
       <div class="tabs">
         <button class="tab-btn active" id="btnFact" onclick="switchTab('facturacion')">FACTURACIÓN</button>
+        <button class="tab-btn" id="btnWompi" onclick="switchTab('wompi')">VENTAS WOMPI</button>
         <button class="tab-btn" id="btnCons" onclick="switchTab('consolidado')">CONSOLIDADO</button>
         <button class="tab-btn" id="btnCont" onclick="switchTab('contratos')">CONTRATOS</button>
         <button class="tab-btn" id="btnTerc" onclick="switchTab('terceros')">TERCEROS</button>
@@ -556,10 +587,42 @@ app.get('/', (req, res) => {
               <th>TOTAL</th>
               <th>SALDO</th>
               <th>EMPRESA</th>
+              <th>FORMA DE PAGO</th>
             </tr>
           </thead>
           <tbody id="tablaFacturas"></tbody>
         </table>
+      </div>
+
+      <!-- Vista Ventas Wompi -->
+      <div id="viewWompi" style="display:none;">
+        <div class="aviso" style="background:#eff6ff;color:#1e40af;">
+          Ventas cuya forma de pago corresponde a Wompi (contrapartida 138095). Si falta alguna o sobra otra, revisa las
+          <a href="/api/formas-pago" target="_blank">formas de pago de Siigo</a>.
+        </div>
+        <div class="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>CLIENTE</th>
+                <th>NIT</th>
+                <th>MES</th>
+                <th>CONSUMO MES</th>
+                <th>No FRA</th>
+                <th>FECHA</th>
+                <th>VENCIMIENTO</th>
+                <th>CONDICIÓN</th>
+                <th>FECHA DE PAGO</th>
+                <th>VALOR BRUTO</th>
+                <th>TOTAL</th>
+                <th>SALDO</th>
+                <th>EMPRESA</th>
+                <th>FORMA DE PAGO</th>
+              </tr>
+            </thead>
+            <tbody id="tablaWompi"></tbody>
+          </table>
+        </div>
       </div>
 
       <!-- Vista Consolidado -->
@@ -694,7 +757,9 @@ app.get('/', (req, res) => {
         async function cargarFacturas() {
           const ano = document.getElementById('selAno').value;
           const mes = document.getElementById('selMes').value;
-          document.getElementById('tablaFacturas').innerHTML = '<tr><td colspan="13" style="text-align:center;">Consultando Siigo...</td></tr>';
+          const cargando = '<tr><td colspan="14" style="text-align:center;">Consultando Siigo...</td></tr>';
+          document.getElementById('tablaFacturas').innerHTML = cargando;
+          document.getElementById('tablaWompi').innerHTML = cargando;
           let resumen = [];
           try {
             const res = await fetch('/api/facturas?ano=' + ano + (mes ? '&mes=' + mes : ''));
@@ -717,6 +782,8 @@ app.get('/', (req, res) => {
           document.getElementById('btnCons').classList.toggle('active', tab === 'consolidado');
           document.getElementById('btnCont').classList.toggle('active', tab === 'contratos');
           document.getElementById('btnTerc').classList.toggle('active', tab === 'terceros');
+          document.getElementById('btnWompi').classList.toggle('active', tab === 'wompi');
+          document.getElementById('viewWompi').style.display = tab === 'wompi' ? 'block' : 'none';
 
           document.getElementById('viewFacturacion').style.display = tab === 'facturacion' ? 'block' : 'none';
           document.getElementById('viewConsolidado').style.display = tab === 'consolidado' ? 'block' : 'none';
@@ -736,6 +803,9 @@ app.get('/', (req, res) => {
           } else if (tab === 'terceros') {
             document.getElementById('kpiLabel').innerText = 'Terceros listados';
             cargarTerceros(false);
+          } else if (tab === 'wompi') {
+            document.getElementById('kpiLabel').innerText = 'Total Ventas Wompi (Bruto)';
+            refrescarFacturasSiHaceFalta();
           }
         }
 
@@ -769,16 +839,22 @@ app.get('/', (req, res) => {
                    (!fEmp || f.empresa === fEmp);
           });
 
+          // Facturación y Consolidado muestran todo menos las ventas Wompi; esas van en su pestaña
+          const normales = filtradas.filter(function (f) { return !f.esWompi; });
+          const wompi = filtradas.filter(function (f) { return f.esWompi; });
+
           if (tabActual === 'facturacion') {
-            renderFacturas(filtradas);
+            renderFacturas(normales, 'tablaFacturas');
+          } else if (tabActual === 'wompi') {
+            renderFacturas(wompi, 'tablaWompi');
           } else if (tabActual === 'consolidado') {
-            renderConsolidado(filtradas);
+            renderConsolidado(normales);
           }
         }
 
         function fmt(n) { return '$ ' + Number(n || 0).toLocaleString('es-CO'); }
 
-        function renderFacturas(data) {
+        function renderFacturas(data, destino) {
           let html = '';
           let total = 0;
           data.forEach(function (f) {
@@ -798,9 +874,10 @@ app.get('/', (req, res) => {
               '<td>' + fmt(f.total) + '</td>' +
               '<td>' + fmt(f.saldo) + '</td>' +
               '<td>' + f.empresa + '</td>' +
+              '<td>' + esc(f.formaPago || '-') + '</td>' +
               '</tr>';
           });
-          document.getElementById('tablaFacturas').innerHTML = html || '<tr><td colspan="13" style="text-align:center;">Sin datos</td></tr>';
+          document.getElementById(destino || 'tablaFacturas').innerHTML = html || '<tr><td colspan="14" style="text-align:center;">Sin datos</td></tr>';
           document.getElementById('totalKPI').innerText = fmt(total);
         }
 
