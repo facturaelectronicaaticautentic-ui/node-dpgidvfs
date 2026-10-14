@@ -36,7 +36,7 @@ async function getToken(empresa) {
   }
 }
 
-// Endpoint de Facturas
+// Endpoint de Facturas con Extracción Mejorada de Razón Social / Nombre
 app.get('/api/facturas', async (req, res) => {
   let todasLasFacturas = [];
 
@@ -51,21 +51,30 @@ app.get('/api/facturas', async (req, res) => {
         const facturas = (respuesta.data.results || []).map(f => {
           const fechaObj = new Date(f.date);
           
-          // 1. Obtención exacta del nombre del Cliente
-          let clienteNombre = 'N/A';
-          if (f.customer) {
-            if (typeof f.customer.name === 'string') {
-              clienteNombre = f.customer.name;
-            } else if (Array.isArray(f.customer.name) && f.customer.name.length > 0) {
-              clienteNombre = f.customer.name.join(' ');
-            } else if (f.customer.full_name) {
-              clienteNombre = f.customer.full_name;
-            } else if (f.customer.identification) {
-              clienteNombre = `NIT/CC: ${f.customer.identification}`;
+          // --- Extracción Prioritaria de Nombre/Razón Social ---
+          let clienteNombre = '';
+          const c = f.customer || {};
+
+          if (c.full_name && c.full_name.trim() !== '') {
+            clienteNombre = c.full_name;
+          } else if (c.company_name && c.company_name.trim() !== '') {
+            clienteNombre = c.company_name;
+          } else if (c.person && (c.person.first_name || c.person.last_name)) {
+            clienteNombre = `${c.person.first_name || ''} ${c.person.last_name || ''}`.trim();
+          } else if (c.name) {
+            if (Array.isArray(c.name)) {
+              clienteNombre = c.name.filter(Boolean).join(' ');
+            } else if (typeof c.name === 'string') {
+              clienteNombre = c.name;
             }
           }
 
-          // 2. Obtención del Valor Bruto (Subtotal de la factura sin impuestos)
+          // Si Siigo no envía el nombre directo en el listado
+          if (!clienteNombre || clienteNombre.trim() === '') {
+            clienteNombre = c.identification ? `CLIENTE (${c.identification})` : 'N/A';
+          }
+
+          // --- Obtención del Valor Bruto (Subtotal sin impuestos) ---
           let valorBruto = f.subtotal || 0;
           if (!valorBruto && f.items && f.items.length > 0) {
             valorBruto = f.items.reduce((acc, item) => acc + (item.price * item.quantity || item.total || 0), 0);
@@ -75,7 +84,7 @@ app.get('/api/facturas', async (req, res) => {
           }
 
           return {
-            cliente: clienteNombre.trim(),
+            cliente: clienteNombre.trim().toUpperCase(),
             mes: fechaObj.toLocaleString('es-ES', { month: 'long' }).toUpperCase(),
             numMes: fechaObj.getMonth(),
             ano: fechaObj.getFullYear().toString(),
@@ -93,7 +102,7 @@ app.get('/api/facturas', async (req, res) => {
     }
   }
 
-  // Datos demo de respaldo si no hay credenciales activas
+  // Datos demo de respaldo
   if (todasLasFacturas.length === 0) {
     todasLasFacturas = [
       { cliente: 'YOBANY ALBERTO LOPEZ QUINTERO', mes: 'ENERO', numMes: 0, ano: '2026', numero: '14201', fecha: '2026-01-15', condicion: 'PAGADO', fechaPago: '2026-01-20', responsable: 'JUAN PEREZ', valor: 10921780, empresa: 'Empresa 1' },
