@@ -8,48 +8,19 @@ app.use(cors());
 app.use(express.json());
 
 const empresas = [
-  {
-    id: 1,
-    nombre: process.env.EMPRESA1_NOMBRE || 'Empresa 1',
-    user: process.env.EMPRESA1_USER,
-    key: process.env.EMPRESA1_KEY,
-  },
-  {
-    id: 2,
-    nombre: process.env.EMPRESA2_NOMBRE || 'Empresa 2',
-    user: process.env.EMPRESA2_USER,
-    key: process.env.EMPRESA2_KEY,
-  },
+  { id: 1, nombre: process.env.EMPRESA1_NOMBRE || "Empresa 1", user: process.env.EMPRESA1_USER, key: process.env.EMPRESA1_KEY },
+  { id: 2, nombre: process.env.EMPRESA2_NOMBRE || "Empresa 2", user: process.env.EMPRESA2_USER, key: process.env.EMPRESA2_KEY }
 ];
 
 const siigoClient = axios.create({
   timeout: 15000,
-  headers: {
-    'Content-Type': 'application/json',
-    'Partner-Id': 'PortalAutenTIC',
-  },
+  headers: { 'Content-Type': 'application/json', 'Partner-Id': 'PortalAutenTIC' }
 });
 
 // Base de datos temporal en memoria para Contratos
 let contratosBD = [
-  {
-    id: 1,
-    cliente: 'INTELCOST SAS',
-    valor: 15000000,
-    fechaInicio: '2026-01-01',
-    fechaFin: '2026-12-31',
-    estado: 'ACTIVO',
-    responsable: 'MARIA GOMEZ',
-  },
-  {
-    id: 2,
-    cliente: 'VISION Y MARKETING SAS',
-    valor: 8500000,
-    fechaInicio: '2026-03-01',
-    fechaFin: '2026-09-30',
-    estado: 'FINALIZADO',
-    responsable: 'CARLOS RUIZ',
-  },
+  { id: 1, cliente: 'INTELCOST SAS', valor: 15000000, fechaInicio: '2026-01-01', fechaFin: '2026-12-31', estado: 'ACTIVO', responsable: 'MARIA GOMEZ' },
+  { id: 2, cliente: 'VISION Y MARKETING SAS', valor: 8500000, fechaInicio: '2026-03-01', fechaFin: '2026-09-30', estado: 'FINALIZADO', responsable: 'CARLOS RUIZ' }
 ];
 
 async function getToken(empresa) {
@@ -57,7 +28,7 @@ async function getToken(empresa) {
   try {
     const res = await siigoClient.post('https://api.siigo.com/auth', {
       username: empresa.user,
-      access_key: empresa.key,
+      access_key: empresa.key
     });
     return res.data.access_token;
   } catch (err) {
@@ -73,30 +44,48 @@ app.get('/api/facturas', async (req, res) => {
     const token = await getToken(emp);
     if (token) {
       try {
-        const respuesta = await siigoClient.get(
-          'https://api.siigo.com/v1/invoices?page=1&page_size=100',
-          {
-            headers: { Authorization: token },
-          }
-        );
-        const facturas = (respuesta.data.results || []).map((f) => {
+        const respuesta = await siigoClient.get('https://api.siigo.com/v1/invoices?page=1&page_size=100', {
+          headers: { 'Authorization': token }
+        });
+        
+        const facturas = (respuesta.data.results || []).map(f => {
           const fechaObj = new Date(f.date);
+          
+          // 1. Obtención exacta del nombre del Cliente
+          let clienteNombre = 'N/A';
+          if (f.customer) {
+            if (typeof f.customer.name === 'string') {
+              clienteNombre = f.customer.name;
+            } else if (Array.isArray(f.customer.name) && f.customer.name.length > 0) {
+              clienteNombre = f.customer.name.join(' ');
+            } else if (f.customer.full_name) {
+              clienteNombre = f.customer.full_name;
+            } else if (f.customer.identification) {
+              clienteNombre = `NIT/CC: ${f.customer.identification}`;
+            }
+          }
+
+          // 2. Obtención del Valor Bruto (Subtotal de la factura sin impuestos)
+          let valorBruto = f.subtotal || 0;
+          if (!valorBruto && f.items && f.items.length > 0) {
+            valorBruto = f.items.reduce((acc, item) => acc + (item.price * item.quantity || item.total || 0), 0);
+          }
+          if (!valorBruto) {
+            valorBruto = f.total || 0;
+          }
+
           return {
-            cliente: f.customer
-              ? f.customer.full_name || f.customer.name || 'N/A'
-              : 'N/A',
-            mes: fechaObj
-              .toLocaleString('es-ES', { month: 'long' })
-              .toUpperCase(),
+            cliente: clienteNombre.trim(),
+            mes: fechaObj.toLocaleString('es-ES', { month: 'long' }).toUpperCase(),
             numMes: fechaObj.getMonth(),
             ano: fechaObj.getFullYear().toString(),
             numero: f.name || f.id,
             fecha: f.date,
             condicion: f.balance > 0 ? 'PENDIENTE' : 'PAGADO',
             fechaPago: f.balance === 0 ? f.date : '-',
-            responsable: f.seller ? f.seller.name : 'N/A',
-            valor: f.total || 0,
-            empresa: emp.nombre,
+            responsable: f.seller ? (f.seller.name || `${f.seller.first_name || ''} ${f.seller.last_name || ''}`) : 'N/A',
+            valor: valorBruto,
+            empresa: emp.nombre
           };
         });
         todasLasFacturas = todasLasFacturas.concat(facturas);
@@ -104,74 +93,14 @@ app.get('/api/facturas', async (req, res) => {
     }
   }
 
-  // Datos demo
+  // Datos demo de respaldo si no hay credenciales activas
   if (todasLasFacturas.length === 0) {
     todasLasFacturas = [
-      {
-        cliente: 'YOBANY ALBERTO LOPEZ QUINTERO',
-        mes: 'ENERO',
-        numMes: 0,
-        ano: '2026',
-        numero: '14201',
-        fecha: '2026-01-15',
-        condicion: 'PAGADO',
-        fechaPago: '2026-01-20',
-        responsable: 'JUAN PEREZ',
-        valor: 10921780,
-        empresa: 'Empresa 1',
-      },
-      {
-        cliente: 'CENTRAL DE ARRENDAMIENTOS INVESTIGACIONES Y COBRANZAS',
-        mes: 'SEPTIEMBRE',
-        numMes: 8,
-        ano: '2026',
-        numero: '14548',
-        fecha: '2026-10-01',
-        condicion: 'PENDIENTE',
-        fechaPago: '-',
-        responsable: 'JUAN PEREZ',
-        valor: 6713500,
-        empresa: 'Empresa 1',
-      },
-      {
-        cliente: 'INTELCOST SAS',
-        mes: 'OCTUBRE',
-        numMes: 9,
-        ano: '2026',
-        numero: '14531',
-        fecha: '2026-10-01',
-        condicion: 'PENDIENTE',
-        fechaPago: '-',
-        responsable: 'MARIA GOMEZ',
-        valor: 3450000,
-        empresa: 'Empresa 1',
-      },
-      {
-        cliente: 'ADMINISTRADORA CLINICA LA COLINA SAS',
-        mes: 'AGOSTO',
-        numMes: 7,
-        ano: '2026',
-        numero: '14530',
-        fecha: '2026-10-01',
-        condicion: 'PENDIENTE',
-        fechaPago: '-',
-        responsable: 'JUAN PEREZ',
-        valor: 1703286,
-        empresa: 'Empresa 2',
-      },
-      {
-        cliente: 'VISION Y MARKETING SAS',
-        mes: 'SEPTIEMBRE',
-        numMes: 8,
-        ano: '2026',
-        numero: '14452',
-        fecha: '2026-09-24',
-        condicion: 'PAGADO',
-        fechaPago: '2026-09-28',
-        responsable: 'CARLOS RUIZ',
-        valor: 3500000,
-        empresa: 'Empresa 2',
-      },
+      { cliente: 'YOBANY ALBERTO LOPEZ QUINTERO', mes: 'ENERO', numMes: 0, ano: '2026', numero: '14201', fecha: '2026-01-15', condicion: 'PAGADO', fechaPago: '2026-01-20', responsable: 'JUAN PEREZ', valor: 10921780, empresa: 'Empresa 1' },
+      { cliente: 'CENTRAL DE ARRENDAMIENTOS INVESTIGACIONES Y COBRANZAS', mes: 'SEPTIEMBRE', numMes: 8, ano: '2026', numero: '14548', fecha: '2026-10-01', condicion: 'PENDIENTE', fechaPago: '-', responsable: 'JUAN PEREZ', valor: 6713500, empresa: 'Empresa 1' },
+      { cliente: 'INTELCOST SAS', mes: 'OCTUBRE', numMes: 9, ano: '2026', numero: '14531', fecha: '2026-10-01', condicion: 'PENDIENTE', fechaPago: '-', responsable: 'MARIA GOMEZ', valor: 3450000, empresa: 'Empresa 1' },
+      { cliente: 'ADMINISTRADORA CLINICA LA COLINA SAS', mes: 'AGOSTO', numMes: 7, ano: '2026', numero: '14530', fecha: '2026-10-01', condicion: 'PENDIENTE', fechaPago: '-', responsable: 'JUAN PEREZ', valor: 1703286, empresa: 'Empresa 2' },
+      { cliente: 'VISION Y MARKETING SAS', mes: 'SEPTIEMBRE', numMes: 8, ano: '2026', numero: '14452', fecha: '2026-09-24', condicion: 'PAGADO', fechaPago: '2026-09-28', responsable: 'CARLOS RUIZ', valor: 3500000, empresa: 'Empresa 2' }
     ];
   }
 
@@ -227,7 +156,7 @@ app.get('/', (req, res) => {
       <div class="header">
         <div class="logo">📐 AutenTIC</div>
         <div class="kpi-box">
-          <div class="kpi-title" id="kpiLabel">Valor Total Facturado</div>
+          <div class="kpi-title" id="kpiLabel">Valor Total Facturado (Bruto)</div>
           <div class="kpi-value" id="totalKPI">$ 0,00</div>
         </div>
       </div>
@@ -258,7 +187,7 @@ app.get('/', (req, res) => {
               <th>FECHA</th>
               <th>CONDICIÓN</th>
               <th>FECHA DE PAGO</th>
-              <th>VALOR</th>
+              <th>VALOR BRUTO</th>
             </tr>
           </thead>
           <tbody id="tablaFacturas"></tbody>
@@ -283,7 +212,7 @@ app.get('/', (req, res) => {
               <th>OCTUBRE</th>
               <th>NOVIEMBRE</th>
               <th>DICIEMBRE</th>
-              <th>TOTAL</th>
+              <th>TOTAL BRUTO</th>
             </tr>
           </thead>
           <tbody id="tablaConsolidado"></tbody>
@@ -346,10 +275,10 @@ app.get('/', (req, res) => {
           document.getElementById('barraFiltros').style.display = tab === 'contratos' ? 'none' : 'flex';
 
           if (tab === 'facturacion') {
-            document.getElementById('kpiLabel').innerText = 'Valor Total Facturado';
+            document.getElementById('kpiLabel').innerText = 'Valor Total Facturado (Bruto)';
             aplicarFiltros();
           } else if (tab === 'consolidado') {
-            document.getElementById('kpiLabel').innerText = 'Total Consolidado';
+            document.getElementById('kpiLabel').innerText = 'Total Consolidado (Bruto)';
             renderConsolidado(facturasGlobales);
           } else if (tab === 'contratos') {
             document.getElementById('kpiLabel').innerText = 'Total Contratos Registrados';
