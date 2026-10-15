@@ -37,10 +37,14 @@ const COMERCIALES = (process.env.COMERCIALES
 // Siigo no entrega la contrapartida contable en la API, así que se clasifica por la forma de pago de la factura.
 // Cada elemento puede ser el NOMBRE (basta con que lo contenga) o el ID de la forma de pago.
 // Se cambia con WOMPI_FORMAS_PAGO en el .env, separado por ;  (por defecto: cualquier forma de pago que contenga "WOMPI")
-const WOMPI_FORMAS = (process.env.WOMPI_FORMAS_PAGO || 'WOMPI').split(';').map(s => s.trim().toUpperCase()).filter(Boolean);
+// "Cruce de vencimiento" siempre se cuenta como venta Wompi, además de lo que se defina en WOMPI_FORMAS_PAGO.
+// Se comparan nombres sin tildes ni mayúsculas, y "contiene" (así también sirve "Cruce de vencimientos").
+const normalizarTexto = (t) => String(t == null ? '' : t).normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().trim();
+const WOMPI_FORMAS = ((process.env.WOMPI_FORMAS_PAGO || 'WOMPI') + ';CRUCE DE VENCIMIENTO')
+  .split(';').map(normalizarTexto).filter(Boolean);
 function esPagoWompi(p) {
-  const id = String(p.id == null ? '' : p.id).toUpperCase();
-  const nombre = String(p.name || '').toUpperCase();
+  const id = normalizarTexto(p.id);
+  const nombre = normalizarTexto(p.name);
   return WOMPI_FORMAS.some(w => w === id || (nombre !== '' && nombre.includes(w)));
 }
 
@@ -909,7 +913,7 @@ app.get('/', (req, res) => {
       <div id="viewWompi" style="display:none;">
         <div class="aviso" style="background:#eff6ff;color:#1e40af;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
           <span>
-            Ventas cuya forma de pago corresponde a Wompi (contrapartida 138095). Si falta alguna o sobra otra, revisa las
+            Ventas cuya forma de pago corresponde a Wompi (contrapartida 138095) o a Cruce de vencimiento. Si falta alguna o sobra otra, revisa las
             <a href="/api/formas-pago" target="_blank">formas de pago de Siigo</a>.
           </span>
           <button class="btn-small" onclick="cargarFacturas(true)">🔍 BUSCAR / ACTUALIZAR WOMPI</button>
