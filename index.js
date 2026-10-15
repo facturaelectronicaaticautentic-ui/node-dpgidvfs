@@ -403,6 +403,68 @@ async function ajustarPorMesAsignado(emp, token, facturas, desde, hasta, refresc
   return { facturas: resultado, nota: notas.join(' ') };
 }
 
+// ---------- Notas crédito ----------
+// La factura de Siigo no indica si tiene nota crédito: se leen las notas crédito (GET /v1/credit-notes),
+// que traen invoice.id e invoice.name de la factura a la que se aplicaron, y se cruzan con las facturas.
+const notasCreditoCache = new Map(); // "empresa|desde" -> { ts, mapa }
+
+async function traerNotasCredito(token, desde, hasta) {
+  const todas = [];
+  let page = 1;
+  let total = Infinity;
+  while (todas.length < total) {
+    const data = await siigoGet('/v1/credit-notes', { page, page_size: 100, date_start: desde, date_end: hasta }, token);
+    const results = data.results || [];
+    total = data.pagination && data.pagination.total_results != null ? data.pagination.total_results : results.length;
+    todas.push(...results);
+    if (results.length === 0) break;
+    page++;
+  }
+  return todas;
+}
+
+// Notas crédito emitidas desde 2 meses antes del periodo hasta hoy (una nota puede emitirse meses después de la factura)
+async function notasCreditoPorFactura(emp, token, desde, refrescar) {
+  const ini = sumarDias(desde, -62);
+  const fin = sumarDias(new Date().toISOString().slice(0, 10), 1);
+  const clave = `${emp.id}|${ini}`;
+  const c = notasCreditoCache.get(clave);
+  if (!refrescar && c && Date.now() - c.ts < 5 * 60 * 1000) return c.mapa;
+
+  const lista = await traerNotasCredito(token, ini, fin);
+  const porId = new Map();
+  const porNombre = new Map();
+  const acumular = (mapa, k, n) => {
+    if (!k) return;
+    const e = mapa.get(k) || { total: 0, nombres: [] };
+    e.total += Number(n.total) || 0;
+    e.nombres.push(n.name || String(n.id));
+    mapa.set(k, e);
+  };
+  lista.forEach(n => {
+    const ref = n.invoice || {};
+    acumular(porId, ref.id ? String(ref.id) : '', n);
+    acumular(porNombre, ref.name ? String(ref.name) : '', n);
+  });
+  const mapa = { porId, porNombre };
+  notasCreditoCache.set(clave, { ts: Date.now(), mapa });
+  return mapa;
+}
+
+// Resumen para el diagnóstico: permite comprobar con datos reales cómo referencia Siigo la factura
+async function resumenNotasCredito(token, desde) {
+  try {
+    const lista = await traerNotasCredito(token, sumarDias(desde, -62), sumarDias(new Date().toISOString().slice(0, 10), 1));
+    return {
+      recibidas: lista.length,
+      conFacturaReferenciada: lista.filter(n => n.invoice && (n.invoice.id || n.invoice.name)).length,
+      ejemplos: lista.slice(0, 3).map(n => ({ nota: n.name, factura: n.invoice || null, total: n.total, fecha: n.date }))
+    };
+  } catch (e) {
+    return { error: describirError(e) };
+  }
+}
+
 async function facturasDeEmpresa(emp, desde, hasta, refrescar) {
   const token = await getToken(emp);
   if (!token) return [];
@@ -422,7 +484,14 @@ async function facturasDeEmpresa(emp, desde, hasta, refrescar) {
     : '';
   const ajuste = await ajustarPorMesAsignado(emp, token, facturas, desde, hasta, refrescar);
   facturas = ajuste.facturas;
-  const nota = [await resolverClientes(emp, token, facturas), ajuste.nota, incompleta].filter(Boolean).join(' ');
+  let ncMapa = null;
+  let notaNC = '';
+  try {
+    ncMapa = await notasCreditoPorFactura(emp, token, desde, refrescar);
+  } catch (e) {
+    notaNC = `No se pudieron cargar las notas crédito (${describirError(e)}); pueden verse facturas con nota crédito.`;
+  }
+  const nota = [await resolverClientes(emp, token, facturas), ajuste.nota, incompleta, notaNC].filter(Boolean).join(' ');
 
   const lista = facturas.map(f => {
     const c = f.customer || {};
@@ -434,6 +503,7 @@ async function facturasDeEmpresa(emp, desde, hasta, refrescar) {
     const ovValido = typeof ov === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(ov);
     const anoEf = ovValido ? ov.slice(0, 4) : y;
     const mesIdx = ovValido ? Number(ov.slice(5, 7)) - 1 : numMes;
+    const nc = ncMapa ? (ncMapa.porId.get(String(f.id)) || ncMapa.porNombre.get(String(f.name))) : null;
     const nit = c.identification || '';
     const nombre = clientesCache.get(`${emp.id}:${c.id}`) || nombreDeCliente(c) || (nit ? `CLIENTE (${nit})` : 'N/A');
     const saldo = Number(f.balance) || 0;
@@ -459,6 +529,9 @@ async function facturasDeEmpresa(emp, desde, hasta, refrescar) {
       responsable: asignaciones[String(nit).trim()] || (seller ? (seller.name || `${seller.first_name || ''} ${seller.last_name || ''}`.trim() || String(seller)) : 'N/A'),
       formaPago: (f.payments || []).map(p => p.name || p.id).join(', ') || '-',
       esWompi: (f.payments || []).some(esPagoWompi),
+      tieneNotaCredito: !!nc,
+      notaCredito: nc ? nc.total : 0,
+      notasCredito: nc ? nc.nombres.join(', ') : '',
       consumo: extraerConsumo(f.observations),
       observaciones: f.observations || '',
       valor: valorBruto(f),
@@ -677,7 +750,8 @@ app.get('/api/diagnostico-facturas', async (req, res) => {
         consecutivoMin: nums.length ? Math.min(...nums) : null,
         consecutivoMax: nums.length ? Math.max(...nums) : null,
         facturasPorDia: Object.fromEntries(Object.entries(porDia).sort()),
-        facturasPorFormaDePago: porPago
+        facturasPorFormaDePago: porPago,
+        notasCredito: await resumenNotasCredito(token, desde)
       });
     } catch (e) {
       salida.empresas.push({ empresa: emp.nombre, error: describirError(e) });
@@ -767,6 +841,7 @@ app.get('/', (req, res) => {
         .btn-submit { background: #002d5b; color: white; border: none; padding: 10px; border-radius: 6px; font-weight: bold; cursor: pointer; grid-column: 1 / -1; }
               .aviso { background: #ecfdf5; color: #065f46; padding: 10px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 12px; }
         .aviso:empty { display: none; }
+        .chk { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #334155; white-space: nowrap; cursor: pointer; }
         .sel-mes { padding: 4px 6px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 12px; background: #fff; color: #334155; }
         .sel-mes.cambiado { border-color: #d97706; background: #fffbeb; font-weight: 600; }
         .aviso.aviso-error { background: #fef2f2; color: #b91c1c; }
@@ -791,6 +866,7 @@ app.get('/', (req, res) => {
         <select id="filterCliente" onchange="aplicarFiltros()"><option value="">CLIENTE (Todos)</option></select>
         <select id="filterResponsable" onchange="aplicarFiltros()"><option value="">RESPONSABLE (Todos)</option></select>
         <select id="filterEmpresa" onchange="aplicarFiltros()"><option value="">EMPRESA (Todas)</option></select>
+        <label class="chk"><input type="checkbox" id="chkNC" onchange="aplicarFiltros()" /> Ver facturas con nota crédito <span id="cntNC"></span></label>
       </div>
 
       <div id="avisoEmpresas" class="aviso"></div>
@@ -820,6 +896,7 @@ app.get('/', (req, res) => {
               <th>VALOR BRUTO</th>
               <th>TOTAL</th>
               <th>SALDO</th>
+              <th>NOTA CRÉDITO</th>
               <th>EMPRESA</th>
               <th>FORMA DE PAGO</th>
             </tr>
@@ -853,6 +930,7 @@ app.get('/', (req, res) => {
                 <th>VALOR BRUTO</th>
                 <th>TOTAL</th>
                 <th>SALDO</th>
+              <th>NOTA CRÉDITO</th>
                 <th>EMPRESA</th>
                 <th>FORMA DE PAGO</th>
               </tr>
@@ -995,7 +1073,7 @@ app.get('/', (req, res) => {
         async function cargarFacturas(soloWompi) {
           const ano = document.getElementById('selAno').value;
           const mes = document.getElementById('selMes').value;
-          const cargando = '<tr><td colspan="14" style="text-align:center;">Consultando Siigo...</td></tr>';
+          const cargando = '<tr><td colspan="15" style="text-align:center;">Consultando Siigo...</td></tr>';
           if (!soloWompi) document.getElementById('tablaFacturas').innerHTML = cargando;
           document.getElementById('tablaWompi').innerHTML = cargando;
           let resumen = [];
@@ -1079,12 +1157,17 @@ app.get('/', (req, res) => {
           const fCli = document.getElementById('filterCliente').value;
           const fResp = document.getElementById('filterResponsable').value;
           const fEmp = document.getElementById('filterEmpresa').value;
+          // Las facturas con nota crédito se ocultan, salvo que se marque "Ver facturas con nota crédito"
+          const verNC = document.getElementById('chkNC').checked;
+          const nNC = facturasGlobales.filter(function (f) { return f.tieneNotaCredito; }).length;
+          document.getElementById('cntNC').innerText = nNC ? '(' + nNC + (verNC ? ' visibles' : ' ocultas') + ')' : '';
 
           const filtradas = facturasGlobales.filter(function (f) {
             return (!fCond || f.condicion === fCond) &&
                    (!fCli || f.cliente === fCli) &&
                    (!fResp || f.responsable === fResp) &&
-                   (!fEmp || f.empresa === fEmp);
+                   (!fEmp || f.empresa === fEmp) &&
+                   (verNC || !f.tieneNotaCredito);
           });
 
           // Facturación y Consolidado muestran todo menos las ventas Wompi; esas van en su pestaña
@@ -1197,11 +1280,12 @@ app.get('/', (req, res) => {
               '<td><b>' + fmt(f.valor) + '</b></td>' +
               '<td>' + fmt(f.total) + '</td>' +
               '<td>' + fmt(f.saldo) + '</td>' +
+              '<td title="' + esc(f.notasCredito || '') + '">' + (f.tieneNotaCredito ? fmt(f.notaCredito) : '-') + '</td>' +
               '<td>' + f.empresa + '</td>' +
               '<td>' + esc(f.formaPago || '-') + '</td>' +
               '</tr>';
           });
-          document.getElementById(destino || 'tablaFacturas').innerHTML = html || '<tr><td colspan="14" style="text-align:center;">Sin datos</td></tr>';
+          document.getElementById(destino || 'tablaFacturas').innerHTML = html || '<tr><td colspan="15" style="text-align:center;">Sin datos</td></tr>';
           document.getElementById('totalKPI').innerText = fmt(total);
         }
 
