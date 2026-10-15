@@ -508,6 +508,8 @@ async function facturasDeEmpresa(emp, desde, hasta, refrescar) {
     const anoEf = ovValido ? ov.slice(0, 4) : y;
     const mesIdx = ovValido ? Number(ov.slice(5, 7)) - 1 : numMes;
     const nc = ncMapa ? (ncMapa.porId.get(String(f.id)) || ncMapa.porNombre.get(String(f.name))) : null;
+    // Facturas que Siigo entrega sin forma de pago (es el caso del cruce de vencimiento): se tratan como ventas Wompi
+    const sinFormaPago = !(f.payments || []).some(p => p && (p.name || p.id));
     const nit = c.identification || '';
     const nombre = clientesCache.get(`${emp.id}:${c.id}`) || nombreDeCliente(c) || (nit ? `CLIENTE (${nit})` : 'N/A');
     const saldo = Number(f.balance) || 0;
@@ -531,8 +533,9 @@ async function facturasDeEmpresa(emp, desde, hasta, refrescar) {
       condicion: saldo > 0 ? 'PENDIENTE' : 'PAGADO',
       fechaPago: saldo === 0 ? f.date : '-',
       responsable: asignaciones[String(nit).trim()] || (seller ? (seller.name || `${seller.first_name || ''} ${seller.last_name || ''}`.trim() || String(seller)) : 'N/A'),
-      formaPago: (f.payments || []).map(p => p.name || p.id).join(', ') || '-',
-      esWompi: (f.payments || []).some(esPagoWompi),
+      formaPago: sinFormaPago ? 'SIN FORMA DE PAGO' : (f.payments || []).map(p => p.name || p.id).filter(Boolean).join(', '),
+      sinFormaPago,
+      esWompi: sinFormaPago || (f.payments || []).some(esPagoWompi),
       tieneNotaCredito: !!nc,
       notaCredito: nc ? nc.total : 0,
       notasCredito: nc ? nc.nombres.join(', ') : '',
@@ -741,10 +744,14 @@ app.get('/api/diagnostico-facturas', async (req, res) => {
       const raw = await traerFacturas(token, salida.consultaASiigo.desde, salida.consultaASiigo.hasta);
       const porDia = {};
       const porPago = {};
+      const sinPago = [];
       raw.forEach(f => {
         porDia[f.date] = (porDia[f.date] || 0) + 1;
         const fp = (f.payments || []).map(p => p.name || p.id).join(', ') || '-';
         porPago[fp] = (porPago[fp] || 0) + 1;
+        if (!(f.payments || []).some(p => p && (p.name || p.id)) && sinPago.length < 5) {
+          sinPago.push({ factura: f.name, fecha: f.date, total: f.total, saldo: f.balance, payments: f.payments === undefined ? '(la factura no trae el campo payments)' : f.payments });
+        }
       });
       const nums = raw.map(f => Number(f.number) || Number((String(f.name || '').match(/(\d+)\s*$/) || [])[1]) || 0).filter(Boolean);
       salida.empresas.push({
@@ -755,6 +762,7 @@ app.get('/api/diagnostico-facturas', async (req, res) => {
         consecutivoMax: nums.length ? Math.max(...nums) : null,
         facturasPorDia: Object.fromEntries(Object.entries(porDia).sort()),
         facturasPorFormaDePago: porPago,
+        ejemplosSinFormaDePago: sinPago,
         notasCredito: await resumenNotasCredito(token, desde)
       });
     } catch (e) {
@@ -913,7 +921,7 @@ app.get('/', (req, res) => {
       <div id="viewWompi" style="display:none;">
         <div class="aviso" style="background:#eff6ff;color:#1e40af;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
           <span>
-            Ventas cuya forma de pago corresponde a Wompi (contrapartida 138095) o a Cruce de vencimiento. Si falta alguna o sobra otra, revisa las
+            Ventas cuya forma de pago corresponde a Wompi (contrapartida 138095) o a Cruce de vencimiento (facturas sin forma de pago). Si falta alguna o sobra otra, revisa las
             <a href="/api/formas-pago" target="_blank">formas de pago de Siigo</a>.
           </span>
           <button class="btn-small" onclick="cargarFacturas(true)">🔍 BUSCAR / ACTUALIZAR WOMPI</button>
