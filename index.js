@@ -90,7 +90,45 @@ async function cargarAsignaciones() {
     console.error('No se pudieron leer las asignaciones de Upstash:', e.message);
   }
 }
-const asignacionesListas = cargarAsignaciones();
+// ---------- Mes asignado manualmente a cada factura ----------
+// Guarda { "empresaId:facturaId": "YYYY-MM" } en Upstash (y en meses.json como respaldo local)
+const ARCHIVO_MESES = path.join(process.env.DATA_DIR || __dirname, 'meses.json');
+const CLAVE_MESES = 'autentic:meses';
+let mesesAsignados = {};
+try { mesesAsignados = JSON.parse(fs.readFileSync(ARCHIVO_MESES, 'utf8')); } catch (e) { mesesAsignados = {}; }
+
+async function cargarMeses() {
+  if (!ALMACEN_REMOTO) return;
+  try {
+    const r = await redis(['HGETALL', CLAVE_MESES]);
+    const remoto = {};
+    if (Array.isArray(r)) {
+      for (let i = 0; i < r.length; i += 2) remoto[r[i]] = r[i + 1];
+    } else if (r && typeof r === 'object') {
+      Object.assign(remoto, r);
+    }
+    for (const [k, v] of Object.entries(mesesAsignados)) {
+      if (!remoto[k]) {
+        try { await redis(['HSET', CLAVE_MESES, k, v]); remoto[k] = v; } catch (e) { /* se reintenta en el próximo arranque */ }
+      }
+    }
+    mesesAsignados = remoto;
+    console.log(`Meses de facturas cargados desde Upstash: ${Object.keys(remoto).length}`);
+  } catch (e) {
+    console.error('No se pudieron leer los meses de Upstash:', e.message);
+  }
+}
+
+async function persistirMes(clave, valor) {
+  if (valor) mesesAsignados[clave] = valor;
+  else delete mesesAsignados[clave];
+  try { fs.writeFileSync(ARCHIVO_MESES, JSON.stringify(mesesAsignados, null, 2)); } catch (e) { /* hosting de solo lectura */ }
+  if (ALMACEN_REMOTO) {
+    await redis(valor ? ['HSET', CLAVE_MESES, clave, valor] : ['HDEL', CLAVE_MESES, clave]);
+  }
+}
+
+const asignacionesListas = Promise.all([cargarAsignaciones(), cargarMeses()]);
 
 async function persistirAsignacion(nit, comercial) {
   if (comercial) asignaciones[nit] = comercial;
@@ -306,6 +344,11 @@ async function facturasDeEmpresa(emp, desde, hasta, refrescar) {
     // Se lee año/mes directo del texto "YYYY-MM-DD" para evitar el desfase de zona horaria
     const [y, m] = String(f.date).split('-');
     const numMes = Number(m) - 1;
+    // Si el usuario cambió el mes de esta factura, se usa ese mes (formato "YYYY-MM")
+    const ov = mesesAsignados[`${emp.id}:${f.id}`];
+    const ovValido = typeof ov === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(ov);
+    const anoEf = ovValido ? ov.slice(0, 4) : y;
+    const mesIdx = ovValido ? Number(ov.slice(5, 7)) - 1 : numMes;
     const nit = c.identification || '';
     const nombre = clientesCache.get(`${emp.id}:${c.id}`) || nombreDeCliente(c) || (nit ? `CLIENTE (${nit})` : 'N/A');
     const saldo = Number(f.balance) || 0;
@@ -315,8 +358,12 @@ async function facturasDeEmpresa(emp, desde, hasta, refrescar) {
       id: f.id,
       cliente: nombre.toUpperCase(),
       nit,
-      mes: MESES[numMes] || '',
-      numMes,
+      empresaId: emp.id,
+      mes: MESES[mesIdx] || '',
+      numMes: mesIdx,
+      numMesFactura: numMes,
+      mesAsignado: ovValido ? ov : '',
+      anoMes: anoEf,
       ano: y,
       numero: f.name || f.id,
       consecutivo: Number(f.number) || Number((String(f.name || '').match(/(\d+)\s*$/) || [])[1]) || 0,
@@ -497,6 +544,23 @@ app.get('/api/formas-pago', async (req, res) => {
   res.type('json').send(JSON.stringify(salida, null, 2));
 });
 
+// PUT /api/facturas/:empresaId/:facturaId/mes   body: { mes: "2026-09" }   (vacío = volver al mes de la factura)
+app.put('/api/facturas/:empresaId/:facturaId/mes', async (req, res) => {
+  await asignacionesListas;
+  const emp = empresas.find(e => String(e.id) === String(req.params.empresaId));
+  const facturaId = String(req.params.facturaId || '').trim();
+  const mes = String((req.body && req.body.mes) || '').trim();
+  if (!emp || !facturaId) return res.status(400).json({ success: false, error: 'Empresa o factura no válida' });
+  if (mes && !/^\d{4}-(0[1-9]|1[0-2])$/.test(mes)) return res.status(400).json({ success: false, error: 'Mes no válido' });
+  try {
+    await persistirMes(`${emp.id}:${facturaId}`, mes);
+    res.json({ success: true });
+  } catch (e) {
+    console.error('No se pudo guardar el mes de la factura:', e.message);
+    res.status(500).json({ success: false, error: 'No se pudo guardar el mes' });
+  }
+});
+
 // Endpoints para Contratos
 app.get('/api/contratos', (req, res) => res.json(contratosBD));
 app.post('/api/contratos', (req, res) => {
@@ -543,6 +607,8 @@ app.get('/', (req, res) => {
         .btn-submit { background: #002d5b; color: white; border: none; padding: 10px; border-radius: 6px; font-weight: bold; cursor: pointer; grid-column: 1 / -1; }
               .aviso { background: #ecfdf5; color: #065f46; padding: 10px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 12px; }
         .aviso:empty { display: none; }
+        .sel-mes { padding: 4px 6px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 12px; background: #fff; color: #334155; }
+        .sel-mes.cambiado { border-color: #d97706; background: #fffbeb; font-weight: 600; }
         .aviso.aviso-error { background: #fef2f2; color: #b91c1c; }
         .filters-container input.buscar { flex: 2; min-width: 220px; padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; }
         .btn-small { background: #002d5b; color: white; border: none; padding: 8px 14px; border-radius: 6px; font-weight: bold; font-size: 12px; cursor: pointer; }
@@ -876,6 +942,64 @@ app.get('/', (req, res) => {
 
         function fmt(n) { return '$ ' + Number(n || 0).toLocaleString('es-CO'); }
 
+        function pad2(n) { return (n < 10 ? '0' : '') + n; }
+
+        // Opciones del selector: los 11 meses anteriores al de la factura, el propio y el siguiente
+        function opcionesMes(f) {
+          const y = Number(String(f.fecha).slice(0, 4));
+          const m = Number(String(f.fecha).slice(5, 7));
+          const lista = [];
+          for (let k = -11; k <= 1; k++) {
+            const idx = m - 1 + k;
+            const yy = y + Math.floor(idx / 12);
+            const mm = ((idx % 12) + 12) % 12;
+            lista.push({ valor: yy + '-' + pad2(mm + 1), etiqueta: NOMBRES_MES[mm] + (yy !== y ? ' ' + yy : '') });
+          }
+          return lista;
+        }
+
+        // Celda MES: selector editable que guarda el mes elegido para esa factura
+        function celdaMes(f) {
+          if (!f.id || !f.fecha || f.empresaId === undefined) return esc(f.mes);
+          const propio = String(f.fecha).slice(0, 7);
+          const actual = f.mesAsignado || propio;
+          const cambiado = !!f.mesAsignado && f.mesAsignado !== propio;
+          return '<select class="sel-mes' + (cambiado ? ' cambiado' : '') + '" data-emp="' + esc(f.empresaId) + '" data-id="' + esc(f.id) + '" ' +
+            'title="' + (cambiado ? 'Mes cambiado manualmente. Fecha de la factura: ' + esc(f.fecha) : 'Mes de la factura. Puedes cambiarlo.') + '" onchange="cambiarMes(this)">' +
+            opcionesMes(f).map(function (o) {
+              return '<option value="' + o.valor + '"' + (o.valor === actual ? ' selected' : '') + '>' + o.etiqueta + '</option>';
+            }).join('') + '</select>';
+        }
+
+        async function cambiarMes(sel) {
+          const empId = sel.getAttribute('data-emp');
+          const id = sel.getAttribute('data-id');
+          const f = facturasGlobales.find(function (x) { return String(x.empresaId) === empId && String(x.id) === id; });
+          if (!f) return;
+          const propio = String(f.fecha).slice(0, 7);
+          const valor = sel.value === propio ? '' : sel.value;
+          const previo = f.mesAsignado || '';
+          sel.disabled = true;
+          try {
+            const res = await fetch('/api/facturas/' + encodeURIComponent(empId) + '/' + encodeURIComponent(id) + '/mes', {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ mes: valor })
+            });
+            if (!res.ok) throw new Error('fallo');
+            f.mesAsignado = valor;
+            const ef = valor || propio;
+            f.anoMes = ef.slice(0, 4);
+            f.numMes = Number(ef.slice(5, 7)) - 1;
+            f.mes = NOMBRES_MES[f.numMes];
+            sel.classList.toggle('cambiado', !!valor);
+          } catch (e) {
+            sel.value = previo || propio;
+            alert('No se pudo guardar el mes de la factura');
+          }
+          sel.disabled = false;
+        }
+
         // Facturas de mayor a menor consecutivo
         function ordenarFacturas(a, b) {
           return (b.consecutivo || 0) - (a.consecutivo || 0) ||
@@ -892,7 +1016,7 @@ app.get('/', (req, res) => {
             html += '<tr>' +
               '<td><b>' + f.cliente + '</b></td>' +
               '<td>' + (f.nit || '-') + '</td>' +
-              '<td>' + f.mes + '</td>' +
+              '<td>' + celdaMes(f) + '</td>' +
               '<td title="' + esc(f.observaciones || '') + '">' + esc(f.consumo || '-') + '</td>' +
               '<td>' + f.numero + '</td>' +
               '<td>' + f.fecha + '</td>' +
@@ -916,7 +1040,10 @@ app.get('/', (req, res) => {
 
           data.forEach(function (f) {
             if (!mapa[f.cliente]) mapa[f.cliente] = Array(12).fill(0);
-            mapa[f.cliente][f.numMes] += f.valor;
+            // Si el mes asignado cae en otro año, se deja en el mes real de la factura para no perder el valor
+            const anoSel = document.getElementById('selAno').value;
+            const idx = (f.anoMes === undefined || String(f.anoMes) === anoSel) ? f.numMes : f.numMesFactura;
+            mapa[f.cliente][idx] += f.valor;
             totalGeneral += f.valor;
           });
 
