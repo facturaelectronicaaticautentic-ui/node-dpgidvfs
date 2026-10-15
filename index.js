@@ -54,8 +54,9 @@ function guardarAsignaciones() {
 // ---------- Almacenamiento permanente (Upstash Redis, gratis) ----------
 // Si defines UPSTASH_REDIS_REST_URL y UPSTASH_REDIS_REST_TOKEN en el .env, las asignaciones
 // se guardan allí y sobreviven a reinicios y despliegues. Sin eso se usa solo el archivo local.
-const UPSTASH_URL = (process.env.UPSTASH_REDIS_REST_URL || '').replace(/\/$/, '');
-const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
+// También se aceptan los nombres que crea la integración de Upstash/KV de Vercel (KV_REST_API_URL / KV_REST_API_TOKEN)
+const UPSTASH_URL = (process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL || '').replace(/\/$/, '');
+const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN || '';
 const ALMACEN_REMOTO = !!(UPSTASH_URL && UPSTASH_TOKEN);
 const CLAVE_ASIGNACIONES = 'autentic:asignaciones';
 
@@ -120,23 +121,47 @@ async function cargarMeses() {
 }
 
 async function persistirMes(clave, valor) {
-  if (valor) mesesAsignados[clave] = valor;
-  else delete mesesAsignados[clave];
-  try { fs.writeFileSync(ARCHIVO_MESES, JSON.stringify(mesesAsignados, null, 2)); } catch (e) { /* hosting de solo lectura */ }
   if (ALMACEN_REMOTO) {
     await redis(valor ? ['HSET', CLAVE_MESES, clave, valor] : ['HDEL', CLAVE_MESES, clave]);
   }
+  if (valor) mesesAsignados[clave] = valor;
+  else delete mesesAsignados[clave];
+  try { fs.writeFileSync(ARCHIVO_MESES, JSON.stringify(mesesAsignados, null, 2)); } catch (e) { /* hosting de solo lectura */ }
 }
 
 const asignacionesListas = Promise.all([cargarAsignaciones(), cargarMeses()]);
 
+function hashAObjeto(r) {
+  const o = {};
+  if (Array.isArray(r)) { for (let i = 0; i < r.length; i += 2) o[r[i]] = r[i + 1]; }
+  else if (r && typeof r === 'object') Object.assign(o, r);
+  return o;
+}
+
+// En hostings tipo Vercel pueden existir varias copias del servidor, cada una con su propia memoria.
+// Para que todas vean lo mismo, antes de usar las asignaciones se vuelven a leer de Upstash (máximo cada 3 segundos).
+let ultimoSync = Date.now();
+async function sincronizarRemoto(forzar) {
+  if (!ALMACEN_REMOTO) return;
+  if (!forzar && Date.now() - ultimoSync < 3000) return;
+  try {
+    const [a, m] = await Promise.all([redis(['HGETALL', CLAVE_ASIGNACIONES]), redis(['HGETALL', CLAVE_MESES])]);
+    asignaciones = hashAObjeto(a);
+    mesesAsignados = hashAObjeto(m);
+    ultimoSync = Date.now();
+  } catch (e) {
+    console.error('No se pudo sincronizar con Upstash (se usa lo que hay en memoria):', e.message);
+  }
+}
+
 async function persistirAsignacion(nit, comercial) {
-  if (comercial) asignaciones[nit] = comercial;
-  else delete asignaciones[nit];
-  guardarAsignaciones();
+  // Primero se guarda en Upstash: si falla, no se cambia nada en memoria y el usuario ve el error
   if (ALMACEN_REMOTO) {
     await redis(comercial ? ['HSET', CLAVE_ASIGNACIONES, nit, comercial] : ['HDEL', CLAVE_ASIGNACIONES, nit]);
   }
+  if (comercial) asignaciones[nit] = comercial;
+  else delete asignaciones[nit];
+  guardarAsignaciones();
 }
 
 function describirError(e) {
@@ -325,6 +350,51 @@ function rangoFechas(ano, mes) {
   return { desde: `${ano}-01-01`, hasta: `${ano}-12-31` };
 }
 
+// El mes asignado manualmente manda sobre la fecha de la factura:
+//  - se quitan del periodo las facturas que el usuario movió a otro mes
+//  - se agregan las que el usuario movió a este periodo aunque estén facturadas en otro mes
+const facturaPorIdCache = new Map(); // "empresa:facturaId" -> { ts, data }
+const MAX_FACTURAS_MOVIDAS = 40;
+
+async function ajustarPorMesAsignado(emp, token, facturas, desde, hasta, refrescar) {
+  const desdeYM = desde.slice(0, 7);
+  const hastaYM = hasta.slice(0, 7);
+  const enRango = (ym) => ym >= desdeYM && ym <= hastaYM;
+  const prefijo = `${emp.id}:`;
+
+  const resultado = facturas.filter(f => {
+    const ov = mesesAsignados[prefijo + f.id];
+    return enRango(typeof ov === 'string' && ov ? ov : String(f.date).slice(0, 7));
+  });
+
+  const presentes = new Set(facturas.map(f => String(f.id)));
+  const pendientes = Object.entries(mesesAsignados)
+    .filter(([clave, ym]) => clave.startsWith(prefijo) && enRango(ym) && !presentes.has(clave.slice(prefijo.length)))
+    .map(([clave]) => clave.slice(prefijo.length));
+
+  const notas = [];
+  if (pendientes.length > MAX_FACTURAS_MOVIDAS) {
+    notas.push(`Hay ${pendientes.length} facturas movidas a este mes; solo se cargaron ${MAX_FACTURAS_MOVIDAS}.`);
+  }
+  let fallidas = 0;
+  for (const id of pendientes.slice(0, MAX_FACTURAS_MOVIDAS)) {
+    const ck = prefijo + id;
+    let c = facturaPorIdCache.get(ck);
+    if (refrescar || !c || Date.now() - c.ts > 10 * 60 * 1000) {
+      try {
+        c = { ts: Date.now(), data: await siigoGet(`/v1/invoices/${encodeURIComponent(id)}`, {}, token) };
+        facturaPorIdCache.set(ck, c);
+      } catch (e) {
+        fallidas++;
+        continue;
+      }
+    }
+    if (c.data && c.data.id) resultado.push(c.data);
+  }
+  if (fallidas) notas.push(`No se pudieron cargar ${fallidas} facturas movidas a este mes desde otro mes.`);
+  return { facturas: resultado, nota: notas.join(' ') };
+}
+
 async function facturasDeEmpresa(emp, desde, hasta, refrescar) {
   const token = await getToken(emp);
   if (!token) return [];
@@ -337,7 +407,9 @@ async function facturasDeEmpresa(emp, desde, hasta, refrescar) {
     facturas = await traerFacturas(token, desde, hasta);
     facturasCache.set(claveCache, { ts: Date.now(), data: facturas });
   }
-  const nota = await resolverClientes(emp, token, facturas);
+  const ajuste = await ajustarPorMesAsignado(emp, token, facturas, desde, hasta, refrescar);
+  facturas = ajuste.facturas;
+  const nota = [await resolverClientes(emp, token, facturas), ajuste.nota].filter(Boolean).join(' ');
 
   const lista = facturas.map(f => {
     const c = f.customer || {};
@@ -391,6 +463,7 @@ async function facturasDeEmpresa(emp, desde, hasta, refrescar) {
 // GET /api/facturas?...&refrescar=1&solo=wompi  -> vuelve a leer Siigo (sin caché) y devuelve solo las ventas Wompi
 app.get('/api/facturas', async (req, res) => {
   await asignacionesListas;
+  await sincronizarRemoto();
   const refrescar = !!req.query.refrescar;
   const soloWompi = req.query.solo === 'wompi';
   const ano = parseInt(req.query.ano, 10) || new Date().getFullYear();
@@ -466,6 +539,7 @@ function aplicarAsignaciones(base) {
 // GET /api/terceros?refrescar=1 (vuelve a leer Siigo)
 app.get('/api/terceros', async (req, res) => {
   await asignacionesListas;
+  await sincronizarRemoto();
   const almacenamiento = ALMACEN_REMOTO ? 'remoto' : 'archivo';
   const vigente = Date.now() - tercerosCache.ts < 10 * 60 * 1000;
   if (!req.query.refrescar && vigente) {
@@ -509,9 +583,35 @@ app.get('/api/terceros', async (req, res) => {
 
 app.get('/api/comerciales', (req, res) => res.json(COMERCIALES));
 
+// GET /api/estado -> diagnóstico del almacenamiento de asignaciones (no muestra claves ni datos)
+app.get('/api/estado', async (req, res) => {
+  await asignacionesListas;
+  await sincronizarRemoto(true);
+  const info = {
+    almacenamientoPermanente: ALMACEN_REMOTO,
+    variablesUsadas: ALMACEN_REMOTO
+      ? (process.env.UPSTASH_REDIS_REST_URL ? 'UPSTASH_REDIS_REST_URL / _TOKEN' : 'KV_REST_API_URL / _TOKEN')
+      : 'ninguna: se usa memoria/archivo local y se pierde al reiniciar o redesplegar',
+    asignacionesEnMemoria: Object.keys(asignaciones).length,
+    mesesEnMemoria: Object.keys(mesesAsignados).length
+  };
+  if (ALMACEN_REMOTO) {
+    try {
+      await redis(['SET', 'autentic:ping', String(Date.now()), 'EX', '60']);
+      info.conexion = 'OK';
+      info.asignacionesEnUpstash = await redis(['HLEN', CLAVE_ASIGNACIONES]);
+      info.mesesEnUpstash = await redis(['HLEN', CLAVE_MESES]);
+    } catch (e) {
+      info.conexion = 'ERROR: ' + e.message;
+    }
+  }
+  res.type('json').send(JSON.stringify(info, null, 2));
+});
+
 // PUT /api/terceros/:nit/comercial   body: { comercial: "NOMBRE" }  (vacío = quitar asignación)
 app.put('/api/terceros/:nit/comercial', async (req, res) => {
   await asignacionesListas;
+  await sincronizarRemoto();
   const nit = String(req.params.nit || '').trim();
   const comercial = String((req.body && req.body.comercial) || '').trim().toUpperCase();
   if (!nit) return res.status(400).json({ success: false, error: 'NIT requerido' });
@@ -547,6 +647,7 @@ app.get('/api/formas-pago', async (req, res) => {
 // PUT /api/facturas/:empresaId/:facturaId/mes   body: { mes: "2026-09" }   (vacío = volver al mes de la factura)
 app.put('/api/facturas/:empresaId/:facturaId/mes', async (req, res) => {
   await asignacionesListas;
+  await sincronizarRemoto();
   const emp = empresas.find(e => String(e.id) === String(req.params.empresaId));
   const facturaId = String(req.params.facturaId || '').trim();
   const mes = String((req.body && req.body.mes) || '').trim();
@@ -993,6 +1094,17 @@ app.get('/', (req, res) => {
             f.numMes = Number(ef.slice(5, 7)) - 1;
             f.mes = NOMBRES_MES[f.numMes];
             sel.classList.toggle('cambiado', !!valor);
+            // Si el mes elegido queda fuera del periodo que se está consultando, la factura sale de esta lista
+            const anoSel = document.getElementById('selAno').value;
+            const mesSel = document.getElementById('selMes').value;
+            const dentro = String(f.anoMes) === anoSel && (!mesSel || Number(ef.slice(5, 7)) === Number(mesSel));
+            if (!dentro) {
+              facturasGlobales = facturasGlobales.filter(function (x) { return x !== f; });
+              aplicarFiltros();
+              const cont = document.getElementById('avisoEmpresas');
+              cont.className = 'aviso';
+              cont.innerHTML = 'Factura <b>' + esc(f.numero) + '</b> movida a <b>' + NOMBRES_MES[f.numMes] + ' ' + esc(f.anoMes) + '</b>. Aparecerá al consultar ese mes.';
+            }
           } catch (e) {
             sel.value = previo || propio;
             alert('No se pudo guardar el mes de la factura');
@@ -1118,7 +1230,7 @@ app.get('/', (req, res) => {
             if (data.almacenamiento === 'archivo') {
               const cont = document.getElementById('avisoEmpresas');
               cont.className = 'aviso aviso-error';
-              cont.innerHTML += '<br>⚠ Las asignaciones se guardan en un archivo local y se pierden si el hosting reinicia o se vuelve a desplegar. Configura UPSTASH_REDIS_REST_URL y UPSTASH_REDIS_REST_TOKEN en el .env para que sean permanentes.';
+              cont.innerHTML += '<br>⚠ Las asignaciones se guardan en un archivo local y se pierden si el hosting reinicia o se vuelve a desplegar. Configura UPSTASH_REDIS_REST_URL y UPSTASH_REDIS_REST_TOKEN (o conecta Upstash desde Vercel > Storage) para que sean permanentes. Diagnóstico: /api/estado';
             }
           } catch (e) {
             tercerosGlobales = [];
