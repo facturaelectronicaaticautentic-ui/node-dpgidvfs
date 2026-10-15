@@ -253,6 +253,7 @@ async function traerFacturas(token, desde, hasta) {
     if (results.length === 0) break;
     page++;
   }
+  todas.esperadas = Number.isFinite(total) ? total : todas.length; // total que reporta Siigo, para detectar cargas incompletas
   return todas;
 }
 
@@ -353,6 +354,13 @@ function rangoFechas(ano, mes) {
 // El mes asignado manualmente manda sobre la fecha de la factura:
 //  - se quitan del periodo las facturas que el usuario movió a otro mes
 //  - se agregan las que el usuario movió a este periodo aunque estén facturadas en otro mes
+// Suma (o resta) días a una fecha "YYYY-MM-DD"
+function sumarDias(fechaISO, n) {
+  const d = new Date(fechaISO + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
 const facturaPorIdCache = new Map(); // "empresa:facturaId" -> { ts, data }
 const MAX_FACTURAS_MOVIDAS = 40;
 
@@ -404,12 +412,17 @@ async function facturasDeEmpresa(emp, desde, hasta, refrescar) {
   if (!refrescar && previo && Date.now() - previo.ts < 2 * 60 * 1000) {
     facturas = previo.data;
   } else {
-    facturas = await traerFacturas(token, desde, hasta);
+    // Se pide un día antes y un día después: el filtro de fechas de Siigo puede dejar por fuera el último día
+    // (o el primero). Luego ajustarPorMesAsignado descarta lo que no pertenece al periodo pedido.
+    facturas = await traerFacturas(token, sumarDias(desde, -1), sumarDias(hasta, 1));
     facturasCache.set(claveCache, { ts: Date.now(), data: facturas });
   }
+  const incompleta = (facturas.esperadas != null && facturas.length < facturas.esperadas)
+    ? `Siigo reportó ${facturas.esperadas} facturas pero solo se recibieron ${facturas.length}; vuelve a consultar.`
+    : '';
   const ajuste = await ajustarPorMesAsignado(emp, token, facturas, desde, hasta, refrescar);
   facturas = ajuste.facturas;
-  const nota = [await resolverClientes(emp, token, facturas), ajuste.nota].filter(Boolean).join(' ');
+  const nota = [await resolverClientes(emp, token, facturas), ajuste.nota, incompleta].filter(Boolean).join(' ');
 
   const lista = facturas.map(f => {
     const c = f.customer || {};
@@ -500,7 +513,17 @@ app.get('/api/facturas', async (req, res) => {
     .sort((a, b) => (b.consecutivo - a.consecutivo) || String(b.fecha).localeCompare(String(a.fecha)));
   res.json({
     facturas,
-    resumen: resultados.map(r => ({ empresa: r.empresa, cantidad: r.facturas.filter(f => !soloWompi || f.esWompi).length, error: r.error, nota: r.nota || '' }))
+    resumen: resultados.map(r => {
+      const lista = r.facturas.filter(f => !soloWompi || f.esWompi);
+      const nums = lista.map(f => f.consecutivo).filter(Boolean);
+      return {
+        empresa: r.empresa,
+        cantidad: lista.length,
+        rango: nums.length ? `${Math.min(...nums)}–${Math.max(...nums)}` : '',
+        error: r.error,
+        nota: r.nota || ''
+      };
+    })
   });
 });
 
@@ -625,6 +648,42 @@ app.put('/api/terceros/:nit/comercial', async (req, res) => {
     console.error('No se pudo guardar la asignación:', e.message);
     res.status(500).json({ success: false, error: 'No se pudo guardar la asignación' });
   }
+});
+
+// GET /api/diagnostico-facturas?ano=2026&mes=9 -> qué entrega Siigo exactamente para ese periodo (sin caché).
+// Sirve para ver cuántas facturas hay por día, el consecutivo mínimo y máximo, y por forma de pago.
+app.get('/api/diagnostico-facturas', async (req, res) => {
+  const ano = parseInt(req.query.ano, 10) || new Date().getFullYear();
+  const mes = parseInt(req.query.mes, 10) || null;
+  const { desde, hasta } = rangoFechas(ano, mes);
+  const salida = { periodo: { desde, hasta }, consultaASiigo: { desde: sumarDias(desde, -1), hasta: sumarDias(hasta, 1) }, empresas: [] };
+  await Promise.all(empresas.map(async (emp) => {
+    if (!emp.user || !emp.key) { salida.empresas.push({ empresa: emp.nombre, error: 'Faltan credenciales' }); return; }
+    try {
+      const token = await getToken(emp);
+      const raw = await traerFacturas(token, salida.consultaASiigo.desde, salida.consultaASiigo.hasta);
+      const porDia = {};
+      const porPago = {};
+      raw.forEach(f => {
+        porDia[f.date] = (porDia[f.date] || 0) + 1;
+        const fp = (f.payments || []).map(p => p.name || p.id).join(', ') || '-';
+        porPago[fp] = (porPago[fp] || 0) + 1;
+      });
+      const nums = raw.map(f => Number(f.number) || Number((String(f.name || '').match(/(\d+)\s*$/) || [])[1]) || 0).filter(Boolean);
+      salida.empresas.push({
+        empresa: emp.nombre,
+        siigoReportaTotal: raw.esperadas,
+        recibidas: raw.length,
+        consecutivoMin: nums.length ? Math.min(...nums) : null,
+        consecutivoMax: nums.length ? Math.max(...nums) : null,
+        facturasPorDia: Object.fromEntries(Object.entries(porDia).sort()),
+        facturasPorFormaDePago: porPago
+      });
+    } catch (e) {
+      salida.empresas.push({ empresa: emp.nombre, error: describirError(e) });
+    }
+  }));
+  res.type('json').send(JSON.stringify(salida, null, 2));
 });
 
 // Muestra las formas de pago de venta de cada empresa en Siigo y cuáles se están tomando como Wompi
@@ -909,7 +968,7 @@ app.get('/', (req, res) => {
           const hayError = resumen.some(function (r) { return r.error || r.nota; });
           cont.className = 'aviso' + (hayError ? ' aviso-error' : '');
           cont.innerHTML = '<b>' + esc(etiqueta) + ' →</b> ' + resumen.map(function (r) {
-            return '<b>' + esc(r.empresa) + ':</b> ' + (r.error ? '⚠ ' + esc(r.error) : r.cantidad + ' registros' + (r.nota ? ' (⚠ ' + esc(r.nota) + ')' : ''));
+            return '<b>' + esc(r.empresa) + ':</b> ' + (r.error ? '⚠ ' + esc(r.error) : r.cantidad + ' registros' + (r.rango ? ' · facturas ' + esc(r.rango) : '') + (r.nota ? ' (⚠ ' + esc(r.nota) + ')' : ''));
           }).join(' &nbsp;|&nbsp; ');
         }
 
