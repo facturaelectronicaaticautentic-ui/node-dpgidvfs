@@ -133,7 +133,39 @@ async function persistirMes(clave, valor) {
   try { fs.writeFileSync(ARCHIVO_MESES, JSON.stringify(mesesAsignados, null, 2)); } catch (e) { /* hosting de solo lectura */ }
 }
 
-const asignacionesListas = Promise.all([cargarAsignaciones(), cargarMeses()]);
+// ---------- Módulo asignado manualmente a cada factura (FACTURACION o WOMPI) ----------
+// Guarda { "empresaId:facturaId": "WOMPI" | "FACTURACION" } y manda sobre la clasificación automática por forma de pago
+const ARCHIVO_MODULOS = path.join(process.env.DATA_DIR || __dirname, 'modulos.json');
+const CLAVE_MODULOS = 'autentic:modulos';
+let modulosAsignados = {};
+try { modulosAsignados = JSON.parse(fs.readFileSync(ARCHIVO_MODULOS, 'utf8')); } catch (e) { modulosAsignados = {}; }
+
+async function cargarModulos() {
+  if (!ALMACEN_REMOTO) return;
+  try {
+    const remoto = hashAObjeto(await redis(['HGETALL', CLAVE_MODULOS]));
+    for (const [k, v] of Object.entries(modulosAsignados)) {
+      if (!remoto[k]) {
+        try { await redis(['HSET', CLAVE_MODULOS, k, v]); remoto[k] = v; } catch (e) { /* se reintenta en el próximo arranque */ }
+      }
+    }
+    modulosAsignados = remoto;
+    console.log(`Módulos de facturas cargados desde Upstash: ${Object.keys(remoto).length}`);
+  } catch (e) {
+    console.error('No se pudieron leer los módulos de Upstash:', e.message);
+  }
+}
+
+async function persistirModulo(clave, valor) {
+  if (ALMACEN_REMOTO) {
+    await redis(valor ? ['HSET', CLAVE_MODULOS, clave, valor] : ['HDEL', CLAVE_MODULOS, clave]);
+  }
+  if (valor) modulosAsignados[clave] = valor;
+  else delete modulosAsignados[clave];
+  try { fs.writeFileSync(ARCHIVO_MODULOS, JSON.stringify(modulosAsignados, null, 2)); } catch (e) { /* hosting de solo lectura */ }
+}
+
+const asignacionesListas = Promise.all([cargarAsignaciones(), cargarMeses(), cargarModulos()]);
 
 function hashAObjeto(r) {
   const o = {};
@@ -149,9 +181,10 @@ async function sincronizarRemoto(forzar) {
   if (!ALMACEN_REMOTO) return;
   if (!forzar && Date.now() - ultimoSync < 3000) return;
   try {
-    const [a, m] = await Promise.all([redis(['HGETALL', CLAVE_ASIGNACIONES]), redis(['HGETALL', CLAVE_MESES])]);
+    const [a, m, mo] = await Promise.all([redis(['HGETALL', CLAVE_ASIGNACIONES]), redis(['HGETALL', CLAVE_MESES]), redis(['HGETALL', CLAVE_MODULOS])]);
     asignaciones = hashAObjeto(a);
     mesesAsignados = hashAObjeto(m);
+    modulosAsignados = hashAObjeto(mo);
     ultimoSync = Date.now();
   } catch (e) {
     console.error('No se pudo sincronizar con Upstash (se usa lo que hay en memoria):', e.message);
@@ -510,6 +543,10 @@ async function facturasDeEmpresa(emp, desde, hasta, refrescar) {
     const nc = ncMapa ? (ncMapa.porId.get(String(f.id)) || ncMapa.porNombre.get(String(f.name))) : null;
     // Facturas que Siigo entrega sin forma de pago (es el caso del cruce de vencimiento): se tratan como ventas Wompi
     const sinFormaPago = !(f.payments || []).some(p => p && (p.name || p.id));
+    const autoWompi = sinFormaPago || (f.payments || []).some(esPagoWompi);
+    // Si el usuario eligió el módulo de esta factura, esa elección manda sobre la clasificación automática
+    const mo = modulosAsignados[`${emp.id}:${f.id}`];
+    const moValido = mo === 'WOMPI' || mo === 'FACTURACION';
     const nit = c.identification || '';
     const nombre = clientesCache.get(`${emp.id}:${c.id}`) || nombreDeCliente(c) || (nit ? `CLIENTE (${nit})` : 'N/A');
     const saldo = Number(f.balance) || 0;
@@ -535,7 +572,9 @@ async function facturasDeEmpresa(emp, desde, hasta, refrescar) {
       responsable: asignaciones[String(nit).trim()] || (seller ? (seller.name || `${seller.first_name || ''} ${seller.last_name || ''}`.trim() || String(seller)) : 'N/A'),
       formaPago: sinFormaPago ? 'SIN FORMA DE PAGO' : (f.payments || []).map(p => p.name || p.id).filter(Boolean).join(', '),
       sinFormaPago,
-      esWompi: sinFormaPago || (f.payments || []).some(esPagoWompi),
+      esWompi: moValido ? mo === 'WOMPI' : autoWompi,
+      esWompiAuto: autoWompi,
+      moduloAsignado: moValido ? mo : '',
       tieneNotaCredito: !!nc,
       notaCredito: nc ? nc.total : 0,
       notasCredito: nc ? nc.nombres.join(', ') : '',
@@ -696,7 +735,8 @@ app.get('/api/estado', async (req, res) => {
       ? (process.env.UPSTASH_REDIS_REST_URL ? 'UPSTASH_REDIS_REST_URL / _TOKEN' : 'KV_REST_API_URL / _TOKEN')
       : 'ninguna: se usa memoria/archivo local y se pierde al reiniciar o redesplegar',
     asignacionesEnMemoria: Object.keys(asignaciones).length,
-    mesesEnMemoria: Object.keys(mesesAsignados).length
+    mesesEnMemoria: Object.keys(mesesAsignados).length,
+    modulosEnMemoria: Object.keys(modulosAsignados).length
   };
   if (ALMACEN_REMOTO) {
     try {
@@ -704,6 +744,7 @@ app.get('/api/estado', async (req, res) => {
       info.conexion = 'OK';
       info.asignacionesEnUpstash = await redis(['HLEN', CLAVE_ASIGNACIONES]);
       info.mesesEnUpstash = await redis(['HLEN', CLAVE_MESES]);
+      info.modulosEnUpstash = await redis(['HLEN', CLAVE_MODULOS]);
     } catch (e) {
       info.conexion = 'ERROR: ' + e.message;
     }
@@ -787,6 +828,24 @@ app.get('/api/formas-pago', async (req, res) => {
     }
   }));
   res.type('json').send(JSON.stringify(salida, null, 2));
+});
+
+// PUT /api/facturas/:empresaId/:facturaId/modulo   body: { modulo: "WOMPI" | "FACTURACION" }   (vacío = clasificación automática)
+app.put('/api/facturas/:empresaId/:facturaId/modulo', async (req, res) => {
+  await asignacionesListas;
+  await sincronizarRemoto();
+  const emp = empresas.find(e => String(e.id) === String(req.params.empresaId));
+  const facturaId = String(req.params.facturaId || '').trim();
+  const modulo = String((req.body && req.body.modulo) || '').trim().toUpperCase();
+  if (!emp || !facturaId) return res.status(400).json({ success: false, error: 'Empresa o factura no válida' });
+  if (modulo && modulo !== 'WOMPI' && modulo !== 'FACTURACION') return res.status(400).json({ success: false, error: 'Módulo no válido' });
+  try {
+    await persistirModulo(`${emp.id}:${facturaId}`, modulo);
+    res.json({ success: true });
+  } catch (e) {
+    console.error('No se pudo guardar el módulo de la factura:', e.message);
+    res.status(500).json({ success: false, error: 'No se pudo guardar el módulo' });
+  }
 });
 
 // PUT /api/facturas/:empresaId/:facturaId/mes   body: { mes: "2026-09" }   (vacío = volver al mes de la factura)
@@ -911,6 +970,7 @@ app.get('/', (req, res) => {
               <th>NOTA CRÉDITO</th>
               <th>EMPRESA</th>
               <th>FORMA DE PAGO</th>
+              <th>MÓDULO</th>
             </tr>
           </thead>
           <tbody id="tablaFacturas"></tbody>
@@ -945,6 +1005,7 @@ app.get('/', (req, res) => {
               <th>NOTA CRÉDITO</th>
                 <th>EMPRESA</th>
                 <th>FORMA DE PAGO</th>
+              <th>MÓDULO</th>
               </tr>
             </thead>
             <tbody id="tablaWompi"></tbody>
@@ -1085,7 +1146,7 @@ app.get('/', (req, res) => {
         async function cargarFacturas(soloWompi) {
           const ano = document.getElementById('selAno').value;
           const mes = document.getElementById('selMes').value;
-          const cargando = '<tr><td colspan="15" style="text-align:center;">Consultando Siigo...</td></tr>';
+          const cargando = '<tr><td colspan="16" style="text-align:center;">Consultando Siigo...</td></tr>';
           if (!soloWompi) document.getElementById('tablaFacturas').innerHTML = cargando;
           document.getElementById('tablaWompi').innerHTML = cargando;
           let resumen = [];
@@ -1098,8 +1159,11 @@ app.get('/', (req, res) => {
             if (soloWompi) {
               // Se reemplazan solo las ventas Wompi; si una empresa falló, se conservan las que ya había de esa empresa
               const conError = resumen.filter(function (r) { return r.error; }).map(function (r) { return r.empresa; });
+              // También se quitan las copias antiguas de las facturas que llegan de nuevo (por si cambiaron de módulo)
+              const nuevasClaves = {};
+              nuevas.forEach(function (f) { nuevasClaves[f.empresaId + '|' + f.id] = true; });
               facturasGlobales = facturasGlobales.filter(function (f) {
-                return !f.esWompi || conError.indexOf(f.empresa) >= 0;
+                return (!f.esWompi || conError.indexOf(f.empresa) >= 0) && !nuevasClaves[f.empresaId + '|' + f.id];
               }).concat(nuevas);
             } else {
               facturasGlobales = nuevas;
@@ -1226,6 +1290,47 @@ app.get('/', (req, res) => {
             }).join('') + '</select>';
         }
 
+        // Celda MÓDULO: selector para decidir si la factura va en Facturación o en Ventas Wompi
+        function celdaModulo(f) {
+          if (!f.id || f.empresaId === undefined) return '-';
+          const actual = f.esWompi ? 'WOMPI' : 'FACTURACION';
+          const cambiado = !!f.moduloAsignado;
+          return '<select class="sel-mes' + (cambiado ? ' cambiado' : '') + '" data-emp="' + esc(f.empresaId) + '" data-id="' + esc(f.id) + '" ' +
+            'title="' + (cambiado ? 'Módulo elegido manualmente' : 'Clasificación automática según la forma de pago') + '" onchange="cambiarModulo(this)">' +
+            '<option value="FACTURACION"' + (actual === 'FACTURACION' ? ' selected' : '') + '>FACTURACIÓN</option>' +
+            '<option value="WOMPI"' + (actual === 'WOMPI' ? ' selected' : '') + '>WOMPI</option></select>';
+        }
+
+        async function cambiarModulo(sel) {
+          const empId = sel.getAttribute('data-emp');
+          const id = sel.getAttribute('data-id');
+          const f = facturasGlobales.find(function (x) { return String(x.empresaId) === empId && String(x.id) === id; });
+          if (!f) return;
+          const nuevo = sel.value;
+          const previo = f.esWompi ? 'WOMPI' : 'FACTURACION';
+          // Si lo elegido coincide con la clasificación automática, se quita la elección manual
+          const valor = nuevo === (f.esWompiAuto ? 'WOMPI' : 'FACTURACION') ? '' : nuevo;
+          sel.disabled = true;
+          try {
+            const res = await fetch('/api/facturas/' + encodeURIComponent(empId) + '/' + encodeURIComponent(id) + '/modulo', {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ modulo: valor })
+            });
+            if (!res.ok) throw new Error('fallo');
+            f.moduloAsignado = valor;
+            f.esWompi = nuevo === 'WOMPI';
+            aplicarFiltros();
+            const cont = document.getElementById('avisoEmpresas');
+            cont.className = 'aviso';
+            cont.innerHTML = 'Factura <b>' + esc(f.numero) + '</b> movida a <b>' + (f.esWompi ? 'Ventas Wompi' : 'Facturación') + '</b>.';
+          } catch (e) {
+            sel.value = previo;
+            alert('No se pudo guardar el módulo de la factura');
+          }
+          sel.disabled = false;
+        }
+
         async function cambiarMes(sel) {
           const empId = sel.getAttribute('data-emp');
           const id = sel.getAttribute('data-id');
@@ -1295,9 +1400,10 @@ app.get('/', (req, res) => {
               '<td title="' + esc(f.notasCredito || '') + '">' + (f.tieneNotaCredito ? fmt(f.notaCredito) : '-') + '</td>' +
               '<td>' + f.empresa + '</td>' +
               '<td>' + esc(f.formaPago || '-') + '</td>' +
+              '<td>' + celdaModulo(f) + '</td>' +
               '</tr>';
           });
-          document.getElementById(destino || 'tablaFacturas').innerHTML = html || '<tr><td colspan="15" style="text-align:center;">Sin datos</td></tr>';
+          document.getElementById(destino || 'tablaFacturas').innerHTML = html || '<tr><td colspan="16" style="text-align:center;">Sin datos</td></tr>';
           document.getElementById('totalKPI').innerText = fmt(total);
         }
 
