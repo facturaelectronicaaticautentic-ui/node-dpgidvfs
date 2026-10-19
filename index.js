@@ -890,7 +890,7 @@ app.get('/', (req, res) => {
         .kpi-value { font-size: 22px; font-weight: bold; color: #002d5b; }
 
         .filters-container { display: flex; gap: 10px; background: white; padding: 15px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); flex-wrap: wrap; }
-        .filters-container select { flex: 1; min-width: 130px; padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; color: #334155; background: #fff; }
+        .filters-container select { flex: 1; min-width: 175px; padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; color: #334155; background: #fff; }
         .filters-container select.server { border-color: #002d5b; font-weight: 600; }
 
         .tabs { display: flex; gap: 10px; margin-bottom: 20px; }
@@ -919,11 +919,75 @@ app.get('/', (req, res) => {
         .filters-container input.buscar { flex: 2; min-width: 220px; padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; }
         .btn-small { background: #002d5b; color: white; border: none; padding: 8px 14px; border-radius: 6px; font-weight: bold; font-size: 12px; cursor: pointer; }
         .inp-comercial { width: 290px; padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 12px; }
+
+        /* ---------- Estructura global: menú lateral + páginas ---------- */
+        .app { display: flex; gap: 20px; align-items: flex-start; }
+        .sidebar { width: 240px; flex: 0 0 240px; background: #002d5b; color: #fff; border-radius: 8px; padding: 18px 0; position: sticky; top: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.08); }
+        .sidebar .brand { padding: 2px 20px 16px; font-size: 22px; font-weight: 700; border-bottom: 1px solid rgba(255,255,255,0.12); margin-bottom: 8px; }
+        .nav-grupo { padding: 16px 20px 6px; font-size: 11px; letter-spacing: 0.8px; color: #8fb0d6; text-transform: uppercase; }
+        .nav-item { display: block; padding: 12px 20px; color: #cfe0f5; text-decoration: none; font-weight: 600; font-size: 14px; border-left: 4px solid transparent; }
+        .nav-item:hover { background: rgba(255,255,255,0.08); color: #fff; }
+        .nav-item.activo { background: rgba(255,255,255,0.14); color: #fff; border-left-color: #38bdf8; }
+        .contenido { flex: 1; min-width: 0; }
+        .bienvenida { background: #fff; border-radius: 8px; padding: 28px 30px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+        .bienvenida h1 { margin: 0 0 8px; font-size: 26px; color: #002d5b; }
+        .bienvenida p { margin: 0; color: #64748b; font-size: 14px; }
+        .tarjetas { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+        .tarjeta { display: block; background: #fff; border-radius: 8px; padding: 22px; text-decoration: none; color: inherit; box-shadow: 0 2px 4px rgba(0,0,0,0.05); border: 1px solid transparent; }
+        .tarjeta:hover { border-color: #002d5b; }
+        .tarjeta h3 { margin: 0 0 8px; font-size: 18px; color: #002d5b; }
+        .tarjeta p { margin: 0; font-size: 13px; color: #64748b; }
+        .vacio { background: #fff; border-radius: 8px; padding: 40px 30px; text-align: center; color: #64748b; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+        @media (max-width: 800px) {
+          .app { flex-direction: column; }
+          .sidebar { width: auto; flex: none; position: static; align-self: stretch; }
+        }
       </style>
     </head>
     <body>
+      <div class="app">
+        <!-- Menú lateral: Inicio, y debajo los módulos (Comercial primero, Cartera después) -->
+        <aside class="sidebar">
+          <div class="brand">📐 AutenTIC</div>
+          <nav>
+            <a class="nav-item activo" id="navInicio" href="#/inicio">🏠 Inicio</a>
+            <div class="nav-grupo">Módulos</div>
+            <a class="nav-item" id="navComercial" href="#/comercial/facturacion">💼 Módulo Comercial</a>
+            <a class="nav-item" id="navCartera" href="#/cartera">💰 Módulo de Cartera</a>
+          </nav>
+        </aside>
+
+        <div class="contenido">
+          <!-- Página de inicio (punto de aterrizaje) -->
+          <section id="pgInicio">
+            <div class="bienvenida">
+              <h1>Bienvenido a AutenTIC</h1>
+              <p>Control de facturación y cartera de clientes. Elige un módulo para comenzar.</p>
+            </div>
+            <div class="tarjetas">
+              <a class="tarjeta" href="#/comercial/facturacion">
+                <h3>💼 Módulo Comercial</h3>
+                <p>Facturación, ventas Wompi, consolidado, contratos y terceros.</p>
+              </a>
+              <a class="tarjeta" href="#/cartera">
+                <h3>💰 Módulo de Cartera</h3>
+                <p>Gestión de cartera.</p>
+              </a>
+            </div>
+          </section>
+
+          <!-- Módulo de Cartera -->
+          <section id="pgCartera" style="display:none;">
+            <div class="bienvenida">
+              <h1>Módulo de Cartera</h1>
+            </div>
+            <div class="vacio">Este módulo todavía no tiene áreas de trabajo configuradas.</div>
+          </section>
+
+          <!-- Módulo Comercial: 5 áreas en pestañas -->
+          <section id="pgComercial" style="display:none;">
       <div class="header">
-        <div class="logo">📐 AutenTIC</div>
+        <div class="logo">💼 Módulo Comercial</div>
         <div class="kpi-box">
           <div class="kpi-title" id="kpiLabel">Valor Total Facturado (Bruto)</div>
           <div class="kpi-value" id="totalKPI">$ 0,00</div>
@@ -943,11 +1007,11 @@ app.get('/', (req, res) => {
       <div id="avisoEmpresas" class="aviso"></div>
 
       <div class="tabs">
-        <button class="tab-btn active" id="btnFact" onclick="switchTab('facturacion')">FACTURACIÓN</button>
-        <button class="tab-btn" id="btnWompi" onclick="switchTab('wompi')">VENTAS WOMPI</button>
-        <button class="tab-btn" id="btnCons" onclick="switchTab('consolidado')">CONSOLIDADO</button>
-        <button class="tab-btn" id="btnCont" onclick="switchTab('contratos')">CONTRATOS</button>
-        <button class="tab-btn" id="btnTerc" onclick="switchTab('terceros')">TERCEROS</button>
+        <button class="tab-btn active" id="btnFact" onclick="irA('comercial/facturacion')">FACTURACIÓN</button>
+        <button class="tab-btn" id="btnWompi" onclick="irA('comercial/ventas-wompi')">VENTAS WOMPI</button>
+        <button class="tab-btn" id="btnCons" onclick="irA('comercial/consolidado')">CONSOLIDADO</button>
+        <button class="tab-btn" id="btnCont" onclick="irA('comercial/contratos')">CONTRATOS</button>
+        <button class="tab-btn" id="btnTerc" onclick="irA('comercial/terceros')">TERCEROS</button>
       </div>
 
       <!-- Vista Facturación -->
@@ -1099,6 +1163,10 @@ app.get('/', (req, res) => {
             </thead>
             <tbody id="tablaContratos"></tbody>
           </table>
+        </div>
+      </div>
+
+          </section>
         </div>
       </div>
 
@@ -1578,7 +1646,41 @@ app.get('/', (req, res) => {
         }
 
         iniciarSelectoresFecha();
-        cargarFacturas();
+
+        // ---------- Rutas: #/inicio, #/comercial/<área>, #/cartera ----------
+        const AREAS_COMERCIAL = { 'facturacion': 'facturacion', 'ventas-wompi': 'wompi', 'consolidado': 'consolidado', 'contratos': 'contratos', 'terceros': 'terceros' };
+        let facturasCargadas = false;
+
+        function irA(ruta) { location.hash = '#/' + ruta; }
+
+        function mostrarRuta() {
+          let ruta = location.hash || '';
+          if (ruta.charAt(0) === '#') ruta = ruta.slice(1);
+          if (ruta.charAt(0) === '/') ruta = ruta.slice(1);
+          const partes = ruta.split('/');
+          let pagina = partes[0] || 'inicio';
+          if (pagina !== 'comercial' && pagina !== 'cartera') pagina = 'inicio';
+
+          document.getElementById('pgInicio').style.display = pagina === 'inicio' ? 'block' : 'none';
+          document.getElementById('pgComercial').style.display = pagina === 'comercial' ? 'block' : 'none';
+          document.getElementById('pgCartera').style.display = pagina === 'cartera' ? 'block' : 'none';
+          document.getElementById('navInicio').classList.toggle('activo', pagina === 'inicio');
+          document.getElementById('navComercial').classList.toggle('activo', pagina === 'comercial');
+          document.getElementById('navCartera').classList.toggle('activo', pagina === 'cartera');
+
+          if (pagina === 'comercial') {
+            const tab = AREAS_COMERCIAL[partes[1]] || 'facturacion';
+            switchTab(tab);
+            // Siigo solo se consulta al entrar por primera vez a un área que usa facturas
+            if (!facturasCargadas && tab !== 'contratos' && tab !== 'terceros') {
+              facturasCargadas = true;
+              cargarFacturas();
+            }
+          }
+        }
+
+        window.addEventListener('hashchange', mostrarRuta);
+        mostrarRuta();
       </script>
     </body>
     </html>
