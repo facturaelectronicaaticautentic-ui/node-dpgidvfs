@@ -875,6 +875,8 @@ app.post('/api/contratos', (req, res) => {
 });
 
 app.get('/', (req, res) => {
+  const escHtml = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const OPCIONES_EMPRESA = empresas.map(e => '<option value="' + escHtml(e.nombre) + '">' + escHtml(e.nombre) + '</option>').join('');
   res.send(`
     <!DOCTYPE html>
     <html lang="es">
@@ -995,13 +997,14 @@ app.get('/', (req, res) => {
       </div>
 
       <div class="filters-container" id="barraFiltros">
-        <select id="selAno" class="server" onchange="cargarFacturas()"></select>
-        <select id="selMes" class="server" onchange="cargarFacturas()"></select>
-        <select id="filterCondicion" onchange="aplicarFiltros()"><option value="">CONDICIÓN (Todas)</option></select>
-        <select id="filterCliente" onchange="aplicarFiltros()"><option value="">CLIENTE (Todos)</option></select>
-        <select id="filterResponsable" onchange="aplicarFiltros()"><option value="">RESPONSABLE (Todos)</option></select>
-        <select id="filterEmpresa" onchange="aplicarFiltros()"><option value="">EMPRESA (Todas)</option></select>
-        <label class="chk"><input type="checkbox" id="chkNC" onchange="aplicarFiltros()" /> Ver facturas con nota crédito <span id="cntNC"></span></label>
+        <select id="selAno" class="server"></select>
+        <select id="selMes" class="server"></select>
+        <select id="filterCondicion"><option value="">CONDICIÓN (Todas)</option></select>
+        <select id="filterCliente"><option value="">CLIENTE (Todos)</option></select>
+        <select id="filterResponsable"><option value="">RESPONSABLE (Todos)</option></select>
+        <select id="filterEmpresa"><option value="">EMPRESA (Todas)</option></select>
+        <label class="chk"><input type="checkbox" id="chkNC" /> Ver facturas con nota crédito <span id="cntNC"></span></label>
+        <button class="btn-small" id="btnBuscarFact" onclick="buscarFacturacion()">🔍 BUSCAR / ACTUALIZAR</button>
       </div>
 
       <div id="avisoEmpresas" class="aviso"></div>
@@ -1043,12 +1046,16 @@ app.get('/', (req, res) => {
 
       <!-- Vista Ventas Wompi -->
       <div id="viewWompi" style="display:none;">
-        <div class="aviso" style="background:#eff6ff;color:#1e40af;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
-          <span>
-            Ventas cuya forma de pago corresponde a Wompi (contrapartida 138095) o a Cruce de vencimiento (facturas sin forma de pago). Si falta alguna o sobra otra, revisa las
-            <a href="/api/formas-pago" target="_blank">formas de pago de Siigo</a>.
-          </span>
-          <button class="btn-small" onclick="cargarFacturas(true)">🔍 BUSCAR / ACTUALIZAR WOMPI</button>
+        <div class="filters-container" id="barraWompi">
+          <select id="wAno" class="server"></select>
+          <select id="wMes" class="server"></select>
+          <select id="wDia" class="server"></select>
+          <select id="wEmpresa"><option value="">EMPRESA (Todas)</option>${OPCIONES_EMPRESA}</select>
+          <button class="btn-small" id="btnBuscarWompi" onclick="cargarWompi()">🔍 BUSCAR / ACTUALIZAR WOMPI</button>
+        </div>
+        <div class="aviso" style="background:#eff6ff;color:#1e40af;">
+          Ventas cuya forma de pago corresponde a Wompi (contrapartida 138095) o a Cruce de vencimiento (facturas sin forma de pago). Si falta alguna o sobra otra, revisa las
+          <a href="/api/formas-pago" target="_blank">formas de pago de Siigo</a>.
         </div>
         <div class="table-container">
           <table>
@@ -1176,6 +1183,11 @@ app.get('/', (req, res) => {
         let tercerosGlobales = [];
         let comerciales = [];
         let recargarFacturas = false;
+        let wompiGlobales = [];
+        let periodoFact = null;   // { ano, mes } de la última búsqueda de Facturación
+        let periodoWompi = null;  // { ano, mes } de la última búsqueda de Wompi
+        const MSG_FACT = '<tr><td colspan="16" style="text-align:center;">Elige los filtros y presiona 🔍 BUSCAR / ACTUALIZAR.</td></tr>';
+        const MSG_WOMPI = '<tr><td colspan="16" style="text-align:center;">Elige Año, Mes, Día y Empresa y presiona 🔍 BUSCAR / ACTUALIZAR WOMPI.</td></tr>';
 
         function esc(s) {
           return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -1191,8 +1203,15 @@ app.get('/', (req, res) => {
           }).join(' &nbsp;|&nbsp; ');
         }
 
+        // Al volver a una pestaña no se consulta nada: se muestra lo ya cargado.
+        // Si cambió la asignación de comerciales, solo se avisa para que el operador actualice.
         function refrescarFacturasSiHaceFalta() {
-          if (recargarFacturas) { recargarFacturas = false; cargarFacturas(); } else { aplicarFiltros(); }
+          aplicarFiltros();
+          if (recargarFacturas && (facturasGlobales.length || wompiGlobales.length)) {
+            const cont = document.getElementById('avisoEmpresas');
+            cont.className = 'aviso';
+            cont.innerHTML = 'Cambió la asignación de comerciales. Presiona <b>🔍 BUSCAR / ACTUALIZAR</b> para reflejarlo.';
+          }
         }
         const NOMBRES_MES = ['ENERO','FEBRERO','MARZO','ABRIL','MAYO','JUNIO','JULIO','AGOSTO','SEPTIEMBRE','OCTUBRE','NOVIEMBRE','DICIEMBRE'];
 
@@ -1208,41 +1227,89 @@ app.get('/', (req, res) => {
             selMes.innerHTML += '<option value="' + (i + 1) + '">' + m + '</option>';
           });
           selMes.value = String(hoy.getMonth() + 1);
+
+          // Filtros propios de Wompi: Año, Mes, Día y Empresa
+          const wAno = document.getElementById('wAno');
+          for (let y = hoy.getFullYear(); y >= 2022; y--) {
+            wAno.innerHTML += '<option value="' + y + '">AÑO ' + y + '</option>';
+          }
+          const wMes = document.getElementById('wMes');
+          wMes.innerHTML = '<option value="">MES (Todo el año)</option>';
+          NOMBRES_MES.forEach(function (m, i) {
+            wMes.innerHTML += '<option value="' + (i + 1) + '">' + m + '</option>';
+          });
+          wMes.value = String(hoy.getMonth() + 1);
+          const wDia = document.getElementById('wDia');
+          wDia.innerHTML = '<option value="">DÍA (Todos)</option>';
+          for (let d = 1; d <= 31; d++) wDia.innerHTML += '<option value="' + d + '">DÍA ' + d + '</option>';
+
+          document.getElementById('tablaFacturas').innerHTML = MSG_FACT;
+          document.getElementById('tablaWompi').innerHTML = MSG_WOMPI;
         }
 
-        // soloWompi = true: vuelve a leer Siigo (sin caché) y reemplaza únicamente las ventas Wompi
-        async function cargarFacturas(soloWompi) {
+        // ¿La factura cae dentro del periodo consultado?
+        function enPeriodo(f, per) {
+          if (!per) return false;
+          const ef = f.mesAsignado || String(f.fecha).slice(0, 7);
+          return ef.slice(0, 4) === String(per.ano) && (!per.mes || Number(ef.slice(5, 7)) === Number(per.mes));
+        }
+
+        // Búsqueda de Facturación / Consolidado: consulta Siigo solo cuando el operador lo confirma
+        async function cargarFacturas() {
           const ano = document.getElementById('selAno').value;
           const mes = document.getElementById('selMes').value;
-          const cargando = '<tr><td colspan="16" style="text-align:center;">Consultando Siigo...</td></tr>';
-          if (!soloWompi) document.getElementById('tablaFacturas').innerHTML = cargando;
-          document.getElementById('tablaWompi').innerHTML = cargando;
+          const btn = document.getElementById('btnBuscarFact');
+          btn.disabled = true;
+          document.getElementById('tablaFacturas').innerHTML = '<tr><td colspan="16" style="text-align:center;">Consultando Siigo...</td></tr>';
           let resumen = [];
           try {
-            const url = '/api/facturas?ano=' + ano + (mes ? '&mes=' + mes : '') + (soloWompi ? '&refrescar=1&solo=wompi' : '');
-            const res = await fetch(url);
+            const res = await fetch('/api/facturas?ano=' + ano + (mes ? '&mes=' + mes : ''));
             const data = await res.json();
-            const nuevas = data.facturas || [];
+            facturasGlobales = data.facturas || [];
             resumen = data.resumen || [];
-            if (soloWompi) {
-              // Se reemplazan solo las ventas Wompi; si una empresa falló, se conservan las que ya había de esa empresa
-              const conError = resumen.filter(function (r) { return r.error; }).map(function (r) { return r.empresa; });
-              // También se quitan las copias antiguas de las facturas que llegan de nuevo (por si cambiaron de módulo)
-              const nuevasClaves = {};
-              nuevas.forEach(function (f) { nuevasClaves[f.empresaId + '|' + f.id] = true; });
-              facturasGlobales = facturasGlobales.filter(function (f) {
-                return (!f.esWompi || conError.indexOf(f.empresa) >= 0) && !nuevasClaves[f.empresaId + '|' + f.id];
-              }).concat(nuevas);
-            } else {
-              facturasGlobales = nuevas;
-            }
+            periodoFact = { ano: ano, mes: mes };
+            recargarFacturas = false;
           } catch (e) {
-            if (!soloWompi) facturasGlobales = [];
+            facturasGlobales = [];
+            periodoFact = null;
             resumen = [{ empresa: 'Servidor', error: 'No se pudo consultar /api/facturas' }];
           }
-          mostrarAviso(resumen, soloWompi ? 'Ventas Wompi' : 'Facturas');
+          btn.disabled = false;
+          mostrarAviso(resumen, 'Facturas');
           poblarFiltros(facturasGlobales);
-          if (tabActual === 'contratos' || tabActual === 'terceros') return;
+          aplicarFiltros();
+        }
+
+        // Botón BUSCAR / ACTUALIZAR: si cambió el año o el mes se consulta Siigo; si no, solo se aplican los filtros
+        function buscarFacturacion() {
+          const ano = document.getElementById('selAno').value;
+          const mes = document.getElementById('selMes').value;
+          const igual = periodoFact && periodoFact.ano === ano && periodoFact.mes === mes;
+          if (igual && !recargarFacturas && facturasGlobales.length) { aplicarFiltros(); } else { cargarFacturas(); }
+        }
+
+        // Búsqueda exclusiva de Wompi: Año, Mes, Día y Empresa. Vuelve a leer Siigo sin caché.
+        async function cargarWompi() {
+          const ano = document.getElementById('wAno').value;
+          const mes = document.getElementById('wMes').value;
+          const btn = document.getElementById('btnBuscarWompi');
+          btn.disabled = true;
+          document.getElementById('tablaWompi').innerHTML = '<tr><td colspan="16" style="text-align:center;">Consultando Siigo...</td></tr>';
+          let resumen = [];
+          try {
+            const res = await fetch('/api/facturas?ano=' + ano + (mes ? '&mes=' + mes : '') + '&refrescar=1&solo=wompi');
+            const data = await res.json();
+            wompiGlobales = data.facturas || [];
+            resumen = data.resumen || [];
+            periodoWompi = { ano: ano, mes: mes };
+            recargarFacturas = false;
+          } catch (e) {
+            wompiGlobales = [];
+            periodoWompi = null;
+            resumen = [{ empresa: 'Servidor', error: 'No se pudo consultar /api/facturas' }];
+          }
+          btn.disabled = false;
+          mostrarAviso(resumen, 'Ventas Wompi');
           aplicarFiltros();
         }
 
@@ -1259,7 +1326,7 @@ app.get('/', (req, res) => {
           document.getElementById('viewConsolidado').style.display = tab === 'consolidado' ? 'block' : 'none';
           document.getElementById('viewContratos').style.display = tab === 'contratos' ? 'block' : 'none';
           document.getElementById('viewTerceros').style.display = tab === 'terceros' ? 'block' : 'none';
-          document.getElementById('barraFiltros').style.display = (tab === 'contratos' || tab === 'terceros') ? 'none' : 'flex';
+          document.getElementById('barraFiltros').style.display = (tab === 'facturacion' || tab === 'consolidado') ? 'flex' : 'none';
 
           if (tab === 'facturacion') {
             document.getElementById('kpiLabel').innerText = 'Valor Total Facturado (Bruto)';
@@ -1316,15 +1383,31 @@ app.get('/', (req, res) => {
 
           // Facturación y Consolidado muestran todo menos las ventas Wompi; esas van en su pestaña
           const normales = filtradas.filter(function (f) { return !f.esWompi; }).sort(ordenarFacturas);
-          const wompi = filtradas.filter(function (f) { return f.esWompi; }).sort(ordenarFacturas);
 
           if (tabActual === 'facturacion') {
-            renderFacturas(normales, 'tablaFacturas');
+            if (!periodoFact) { document.getElementById('tablaFacturas').innerHTML = MSG_FACT; document.getElementById('totalKPI').innerText = fmt(0); }
+            else renderFacturas(normales, 'tablaFacturas');
           } else if (tabActual === 'wompi') {
-            renderFacturas(wompi, 'tablaWompi');
+            // Wompi usa solo Año y Mes (en la consulta), Día y Empresa; las notas crédito siempre se ocultan
+            const wDia = document.getElementById('wDia').value;
+            const wEmp = document.getElementById('wEmpresa').value;
+            const wompi = wompiGlobales.filter(function (f) {
+              return f.esWompi && !f.tieneNotaCredito &&
+                     (!wEmp || f.empresa === wEmp) &&
+                     (!wDia || Number(String(f.fecha).slice(8, 10)) === Number(wDia));
+            }).sort(ordenarFacturas);
+            if (!periodoWompi) { document.getElementById('tablaWompi').innerHTML = MSG_WOMPI; document.getElementById('totalKPI').innerText = fmt(0); }
+            else renderFacturas(wompi, 'tablaWompi');
           } else if (tabActual === 'consolidado') {
-            renderConsolidado(normales);
+            if (!periodoFact) { document.getElementById('tablaConsolidado').innerHTML = MSG_FACT; document.getElementById('totalKPI').innerText = fmt(0); }
+            else renderConsolidado(normales);
           }
+        }
+
+        // Busca una factura en cualquiera de las dos listas cargadas
+        function buscarFactura(empId, id) {
+          const mismo = function (x) { return String(x.empresaId) === empId && String(x.id) === id; };
+          return facturasGlobales.find(mismo) || wompiGlobales.find(mismo);
         }
 
         function fmt(n) { return '$ ' + Number(n || 0).toLocaleString('es-CO'); }
@@ -1372,7 +1455,7 @@ app.get('/', (req, res) => {
         async function cambiarModulo(sel) {
           const empId = sel.getAttribute('data-emp');
           const id = sel.getAttribute('data-id');
-          const f = facturasGlobales.find(function (x) { return String(x.empresaId) === empId && String(x.id) === id; });
+          const f = buscarFactura(empId, id);
           if (!f) return;
           const nuevo = sel.value;
           const previo = f.esWompi ? 'WOMPI' : 'FACTURACION';
@@ -1388,6 +1471,9 @@ app.get('/', (req, res) => {
             if (!res.ok) throw new Error('fallo');
             f.moduloAsignado = valor;
             f.esWompi = nuevo === 'WOMPI';
+            // La factura pasa a la lista del módulo elegido si ese periodo ya está consultado
+            if (f.esWompi && wompiGlobales.indexOf(f) < 0 && enPeriodo(f, periodoWompi)) wompiGlobales.push(f);
+            if (!f.esWompi && facturasGlobales.indexOf(f) < 0 && enPeriodo(f, periodoFact)) facturasGlobales.push(f);
             aplicarFiltros();
             const cont = document.getElementById('avisoEmpresas');
             cont.className = 'aviso';
@@ -1402,7 +1488,7 @@ app.get('/', (req, res) => {
         async function cambiarMes(sel) {
           const empId = sel.getAttribute('data-emp');
           const id = sel.getAttribute('data-id');
-          const f = facturasGlobales.find(function (x) { return String(x.empresaId) === empId && String(x.id) === id; });
+          const f = buscarFactura(empId, id);
           if (!f) return;
           const propio = String(f.fecha).slice(0, 7);
           const valor = sel.value === propio ? '' : sel.value;
@@ -1422,11 +1508,11 @@ app.get('/', (req, res) => {
             f.mes = NOMBRES_MES[f.numMes];
             sel.classList.toggle('cambiado', !!valor);
             // Si el mes elegido queda fuera del periodo que se está consultando, la factura sale de esta lista
-            const anoSel = document.getElementById('selAno').value;
-            const mesSel = document.getElementById('selMes').value;
-            const dentro = String(f.anoMes) === anoSel && (!mesSel || Number(ef.slice(5, 7)) === Number(mesSel));
+            const enWompi = wompiGlobales.indexOf(f) >= 0;
+            const dentro = enPeriodo(f, enWompi ? periodoWompi : periodoFact);
             if (!dentro) {
               facturasGlobales = facturasGlobales.filter(function (x) { return x !== f; });
+              wompiGlobales = wompiGlobales.filter(function (x) { return x !== f; });
               aplicarFiltros();
               const cont = document.getElementById('avisoEmpresas');
               cont.className = 'aviso';
@@ -1482,8 +1568,8 @@ app.get('/', (req, res) => {
           data.forEach(function (f) {
             if (!mapa[f.cliente]) mapa[f.cliente] = Array(12).fill(0);
             // Si el mes asignado cae en otro año, se deja en el mes real de la factura para no perder el valor
-            const anoSel = document.getElementById('selAno').value;
-            const idx = (f.anoMes === undefined || String(f.anoMes) === anoSel) ? f.numMes : f.numMesFactura;
+            const anoSel = periodoFact ? String(periodoFact.ano) : document.getElementById('selAno').value;
+            const idx =(f.anoMes === undefined || String(f.anoMes) === anoSel) ? f.numMes : f.numMesFactura;
             mapa[f.cliente][idx] += f.valor;
             totalGeneral += f.valor;
           });
@@ -1649,7 +1735,6 @@ app.get('/', (req, res) => {
 
         // ---------- Rutas: #/inicio, #/comercial/<área>, #/cartera ----------
         const AREAS_COMERCIAL = { 'facturacion': 'facturacion', 'ventas-wompi': 'wompi', 'consolidado': 'consolidado', 'contratos': 'contratos', 'terceros': 'terceros' };
-        let facturasCargadas = false;
 
         function irA(ruta) { location.hash = '#/' + ruta; }
 
@@ -1670,12 +1755,8 @@ app.get('/', (req, res) => {
 
           if (pagina === 'comercial') {
             const tab = AREAS_COMERCIAL[partes[1]] || 'facturacion';
+            // Siigo no se consulta al entrar: solo cuando el operador presiona BUSCAR / ACTUALIZAR
             switchTab(tab);
-            // Siigo solo se consulta al entrar por primera vez a un área que usa facturas
-            if (!facturasCargadas && tab !== 'contratos' && tab !== 'terceros') {
-              facturasCargadas = true;
-              cargarFacturas();
-            }
           }
         }
 
