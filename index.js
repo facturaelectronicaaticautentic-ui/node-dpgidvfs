@@ -918,6 +918,8 @@ app.get('/', (req, res) => {
         .sel-mes { padding: 4px 6px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 12px; background: #fff; color: #334155; }
         .sel-mes.cambiado { border-color: #d97706; background: #fffbeb; font-weight: 600; }
         .aviso.aviso-error { background: #fef2f2; color: #b91c1c; }
+        .filters-container input[type=text], .filters-container input[type=number], .filters-container input[type=date] { flex: 1; min-width: 175px; padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; color: #334155; background: #fff; }
+        .nota-vista { background: #eff6ff; color: #1e40af; padding: 10px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 12px; }
         .filters-container input.buscar { flex: 2; min-width: 220px; padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; }
         .btn-small { background: #002d5b; color: white; border: none; padding: 8px 14px; border-radius: 6px; font-weight: bold; font-size: 12px; cursor: pointer; }
         .inp-comercial { width: 290px; padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 12px; }
@@ -1018,7 +1020,9 @@ app.get('/', (req, res) => {
       </div>
 
       <!-- Vista Facturación -->
-      <div id="viewFacturacion" class="table-container">
+      <div id="viewFacturacion">
+        <div class="nota-vista">Ventas del periodo consultado, sin las de Wompi (esas están en VENTAS WOMPI). Elige los filtros y presiona BUSCAR / ACTUALIZAR.</div>
+        <div class="table-container">
         <table>
           <thead>
             <tr>
@@ -1042,6 +1046,7 @@ app.get('/', (req, res) => {
           </thead>
           <tbody id="tablaFacturas"></tbody>
         </table>
+        </div>
       </div>
 
       <!-- Vista Ventas Wompi -->
@@ -1053,7 +1058,7 @@ app.get('/', (req, res) => {
           <select id="wEmpresa"><option value="">EMPRESA (Todas)</option>${OPCIONES_EMPRESA}</select>
           <button class="btn-small" id="btnBuscarWompi" onclick="cargarWompi()">🔍 BUSCAR / ACTUALIZAR WOMPI</button>
         </div>
-        <div class="aviso" style="background:#eff6ff;color:#1e40af;">
+        <div class="nota-vista">
           Ventas cuya forma de pago corresponde a Wompi (contrapartida 138095) o a Cruce de vencimiento (facturas sin forma de pago). Si falta alguna o sobra otra, revisa las
           <a href="/api/formas-pago" target="_blank">formas de pago de Siigo</a>.
         </div>
@@ -1085,7 +1090,9 @@ app.get('/', (req, res) => {
       </div>
 
       <!-- Vista Consolidado -->
-      <div id="viewConsolidado" class="table-container" style="display:none;">
+      <div id="viewConsolidado" style="display:none;">
+        <div class="nota-vista">Valor bruto facturado por cliente y por mes, con los mismos filtros de Facturación (sin las ventas Wompi).</div>
+        <div class="table-container">
         <table>
           <thead>
             <tr>
@@ -1107,6 +1114,7 @@ app.get('/', (req, res) => {
           </thead>
           <tbody id="tablaConsolidado"></tbody>
         </table>
+        </div>
       </div>
 
       <!-- Vista Terceros -->
@@ -1121,6 +1129,7 @@ app.get('/', (req, res) => {
           </select>
           <button class="btn-small" onclick="cargarTerceros(true)">↻ ACTUALIZAR DESDE SIIGO</button>
         </div>
+        <div class="nota-vista">Clientes de ambas empresas en Siigo. El comercial encargado que asignes queda guardado.</div>
         <div class="table-container">
           <table>
             <thead>
@@ -1142,7 +1151,7 @@ app.get('/', (req, res) => {
 
       <!-- Vista Contratos -->
       <div id="viewContratos" style="display:none;">
-        <form class="form-container" onsubmit="guardarContrato(event)">
+        <form class="filters-container" onsubmit="guardarContrato(event)">
           <input type="text" id="cCliente" placeholder="Nombre del Cliente" required />
           <input type="number" id="cValor" placeholder="Valor Contrato" required />
           <input type="date" id="cFechaInicio" required />
@@ -1153,8 +1162,9 @@ app.get('/', (req, res) => {
             <option value="FINALIZADO">FINALIZADO</option>
           </select>
           <input type="text" id="cResponsable" placeholder="Responsable Comercial" required />
-          <button type="submit" class="btn-submit">+ REGISTRAR CONTRATO</button>
+          <button type="submit" class="btn-small">+ REGISTRAR CONTRATO</button>
         </form>
+        <div class="nota-vista">Registro de contratos por cliente.</div>
 
         <div class="table-container">
           <table>
@@ -1336,6 +1346,7 @@ app.get('/', (req, res) => {
             refrescarFacturasSiHaceFalta();
           } else if (tab === 'contratos') {
             document.getElementById('kpiLabel').innerText = 'Total Contratos Registrados';
+            mostrarAviso([], '');
             cargarContratos();
           } else if (tab === 'terceros') {
             document.getElementById('kpiLabel').innerText = 'Terceros listados';
