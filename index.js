@@ -165,7 +165,39 @@ async function persistirModulo(clave, valor) {
   try { fs.writeFileSync(ARCHIVO_MODULOS, JSON.stringify(modulosAsignados, null, 2)); } catch (e) { /* hosting de solo lectura */ }
 }
 
-const asignacionesListas = Promise.all([cargarAsignaciones(), cargarMeses(), cargarModulos()]);
+// ---------- Comercial asignado manualmente a una factura (manda sobre el comercial del cliente) ----------
+// Guarda { "empresaId:facturaId": "NOMBRE DEL COMERCIAL" }; sirve cuando un cliente tiene más de un asesor
+const ARCHIVO_COM_FACT = path.join(process.env.DATA_DIR || __dirname, 'comerciales-factura.json');
+const CLAVE_COM_FACT = 'autentic:comerciales-factura';
+let comercialesFactura = {};
+try { comercialesFactura = JSON.parse(fs.readFileSync(ARCHIVO_COM_FACT, 'utf8')); } catch (e) { comercialesFactura = {}; }
+
+async function cargarComercialesFactura() {
+  if (!ALMACEN_REMOTO) return;
+  try {
+    const remoto = hashAObjeto(await redis(['HGETALL', CLAVE_COM_FACT]));
+    for (const [k, v] of Object.entries(comercialesFactura)) {
+      if (!remoto[k]) {
+        try { await redis(['HSET', CLAVE_COM_FACT, k, v]); remoto[k] = v; } catch (e) { /* se reintenta en el próximo arranque */ }
+      }
+    }
+    comercialesFactura = remoto;
+    console.log(`Comerciales por factura cargados desde Upstash: ${Object.keys(remoto).length}`);
+  } catch (e) {
+    console.error('No se pudieron leer los comerciales por factura de Upstash:', e.message);
+  }
+}
+
+async function persistirComercialFactura(clave, valor) {
+  if (ALMACEN_REMOTO) {
+    await redis(valor ? ['HSET', CLAVE_COM_FACT, clave, valor] : ['HDEL', CLAVE_COM_FACT, clave]);
+  }
+  if (valor) comercialesFactura[clave] = valor;
+  else delete comercialesFactura[clave];
+  try { fs.writeFileSync(ARCHIVO_COM_FACT, JSON.stringify(comercialesFactura, null, 2)); } catch (e) { /* hosting de solo lectura */ }
+}
+
+const asignacionesListas = Promise.all([cargarAsignaciones(), cargarMeses(), cargarModulos(), cargarComercialesFactura()]);
 
 function hashAObjeto(r) {
   const o = {};
@@ -181,10 +213,11 @@ async function sincronizarRemoto(forzar) {
   if (!ALMACEN_REMOTO) return;
   if (!forzar && Date.now() - ultimoSync < 3000) return;
   try {
-    const [a, m, mo] = await Promise.all([redis(['HGETALL', CLAVE_ASIGNACIONES]), redis(['HGETALL', CLAVE_MESES]), redis(['HGETALL', CLAVE_MODULOS])]);
+    const [a, m, mo, cf] = await Promise.all([redis(['HGETALL', CLAVE_ASIGNACIONES]), redis(['HGETALL', CLAVE_MESES]), redis(['HGETALL', CLAVE_MODULOS]), redis(['HGETALL', CLAVE_COM_FACT])]);
     asignaciones = hashAObjeto(a);
     mesesAsignados = hashAObjeto(m);
     modulosAsignados = hashAObjeto(mo);
+    comercialesFactura = hashAObjeto(cf);
     ultimoSync = Date.now();
   } catch (e) {
     console.error('No se pudo sincronizar con Upstash (se usa lo que hay en memoria):', e.message);
@@ -551,6 +584,8 @@ async function facturasDeEmpresa(emp, desde, hasta, refrescar) {
     const nombre = clientesCache.get(`${emp.id}:${c.id}`) || nombreDeCliente(c) || (nit ? `CLIENTE (${nit})` : 'N/A');
     const saldo = Number(f.balance) || 0;
     const seller = f.seller;
+    const comercialCliente = asignaciones[String(nit).trim()] || (seller ? (seller.name || `${seller.first_name || ''} ${seller.last_name || ''}`.trim() || String(seller)) : 'N/A');
+    const comFactura = comercialesFactura[`${emp.id}:${f.id}`] || '';
 
     return {
       id: f.id,
@@ -569,7 +604,9 @@ async function facturasDeEmpresa(emp, desde, hasta, refrescar) {
       vencimiento: f.payments && f.payments[0] ? f.payments[0].due_date || '-' : '-',
       condicion: saldo > 0 ? 'PENDIENTE' : 'PAGADO',
       fechaPago: saldo === 0 ? f.date : '-',
-      responsable: asignaciones[String(nit).trim()] || (seller ? (seller.name || `${seller.first_name || ''} ${seller.last_name || ''}`.trim() || String(seller)) : 'N/A'),
+      responsable: comFactura || comercialCliente,
+      comercialCliente,
+      comercialFactura: comFactura,
       formaPago: sinFormaPago ? 'SIN FORMA DE PAGO' : (f.payments || []).map(p => p.name || p.id).filter(Boolean).join(', '),
       sinFormaPago,
       esWompi: moValido ? mo === 'WOMPI' : autoWompi,
@@ -736,7 +773,8 @@ app.get('/api/estado', async (req, res) => {
       : 'ninguna: se usa memoria/archivo local y se pierde al reiniciar o redesplegar',
     asignacionesEnMemoria: Object.keys(asignaciones).length,
     mesesEnMemoria: Object.keys(mesesAsignados).length,
-    modulosEnMemoria: Object.keys(modulosAsignados).length
+    modulosEnMemoria: Object.keys(modulosAsignados).length,
+    comercialesFacturaEnMemoria: Object.keys(comercialesFactura).length
   };
   if (ALMACEN_REMOTO) {
     try {
@@ -745,6 +783,7 @@ app.get('/api/estado', async (req, res) => {
       info.asignacionesEnUpstash = await redis(['HLEN', CLAVE_ASIGNACIONES]);
       info.mesesEnUpstash = await redis(['HLEN', CLAVE_MESES]);
       info.modulosEnUpstash = await redis(['HLEN', CLAVE_MODULOS]);
+      info.comercialesFacturaEnUpstash = await redis(['HLEN', CLAVE_COM_FACT]);
     } catch (e) {
       info.conexion = 'ERROR: ' + e.message;
     }
@@ -845,6 +884,24 @@ app.put('/api/facturas/:empresaId/:facturaId/modulo', async (req, res) => {
   } catch (e) {
     console.error('No se pudo guardar el módulo de la factura:', e.message);
     res.status(500).json({ success: false, error: 'No se pudo guardar el módulo' });
+  }
+});
+
+// PUT /api/facturas/:empresaId/:facturaId/comercial   body: { comercial: "NOMBRE" }   (vacío = vuelve al comercial del cliente)
+app.put('/api/facturas/:empresaId/:facturaId/comercial', async (req, res) => {
+  await asignacionesListas;
+  await sincronizarRemoto();
+  const emp = empresas.find(e => String(e.id) === String(req.params.empresaId));
+  const facturaId = String(req.params.facturaId || '').trim();
+  const comercial = String((req.body && req.body.comercial) || '').trim();
+  if (!emp || !facturaId) return res.status(400).json({ success: false, error: 'Empresa o factura no válida' });
+  if (comercial && !COMERCIALES.includes(comercial)) return res.status(400).json({ success: false, error: 'Comercial no válido' });
+  try {
+    await persistirComercialFactura(`${emp.id}:${facturaId}`, comercial);
+    res.json({ success: true });
+  } catch (e) {
+    console.error('No se pudo guardar el comercial de la factura:', e.message);
+    res.status(500).json({ success: false, error: 'No se pudo guardar el comercial' });
   }
 });
 
@@ -1093,7 +1150,7 @@ app.get('/', (req, res) => {
 
       <!-- Vista Consolidado -->
       <div id="viewConsolidado" style="display:none;">
-        <div class="nota-vista">Valor bruto facturado por cliente y por mes, con los mismos filtros de Facturación (sin las ventas Wompi).</div>
+        <div class="nota-vista">Valor bruto facturado por cliente y comercial, por mes, con los mismos filtros de Facturación (sin las ventas Wompi).</div>
         <div class="table-container">
         <table>
           <thead>
@@ -1553,9 +1610,50 @@ app.get('/', (req, res) => {
                  String(a.empresa).localeCompare(String(b.empresa));
         }
 
-        // Comercial asignado al cliente (ver pestaña Terceros)
+        // Comercial en texto (Consolidado)
         function celdaComercial(f) {
           return (!f.responsable || f.responsable === 'N/A') ? '<span style="color:#94a3b8;">SIN COMERCIAL</span>' : esc(f.responsable);
+        }
+
+        // Comercial de la factura: por defecto el del cliente (Terceros); se puede cambiar solo en esta factura
+        function celdaComercialFactura(f) {
+          if (!f.id || f.empresaId === undefined) return celdaComercial(f);
+          const porCliente = (!f.comercialCliente || f.comercialCliente === 'N/A') ? 'SIN COMERCIAL' : f.comercialCliente;
+          const cambiado = !!f.comercialFactura;
+          const lista = COMERCIALES_FIJOS.slice();
+          if (cambiado && lista.indexOf(f.comercialFactura) < 0) lista.push(f.comercialFactura);
+          return '<select class="sel-mes' + (cambiado ? ' cambiado' : '') + '" data-emp="' + esc(f.empresaId) + '" data-id="' + esc(f.id) + '" ' +
+            'title="' + (cambiado ? 'Comercial elegido solo para esta factura' : 'Comercial del cliente (Terceros). Puedes cambiarlo solo para esta factura.') + '" onchange="cambiarComercial(this)">' +
+            '<option value=""' + (cambiado ? '' : ' selected') + '>' + esc(porCliente) + ' (cliente)</option>' +
+            lista.map(function (n) { return '<option value="' + esc(n) + '"' + (cambiado && n === f.comercialFactura ? ' selected' : '') + '>' + esc(n) + '</option>'; }).join('') +
+            '</select>';
+        }
+
+        async function cambiarComercial(sel) {
+          const empId = sel.getAttribute('data-emp');
+          const id = sel.getAttribute('data-id');
+          const f = buscarFactura(empId, id);
+          if (!f) return;
+          const valor = sel.value;
+          sel.disabled = true;
+          try {
+            const res = await fetch('/api/facturas/' + encodeURIComponent(empId) + '/' + encodeURIComponent(id) + '/comercial', {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ comercial: valor })
+            });
+            if (!res.ok) throw new Error('fallo');
+            f.comercialFactura = valor;
+            f.responsable = valor || f.comercialCliente;
+            aplicarFiltros();
+            const cont = document.getElementById('avisoEmpresas');
+            cont.className = 'aviso';
+            cont.innerHTML = 'Factura <b>' + esc(f.numero) + '</b>: comercial <b>' + esc(valor || (f.comercialCliente === 'N/A' ? 'SIN COMERCIAL' : f.comercialCliente) + ' (del cliente)') + '</b>.';
+          } catch (e) {
+            sel.value = f.comercialFactura || '';
+            alert('No se pudo guardar el comercial de la factura');
+          }
+          sel.disabled = false;
         }
 
         function renderFacturas(data, destino) {
@@ -1566,7 +1664,7 @@ app.get('/', (req, res) => {
             const badgeClass = f.condicion === 'PENDIENTE' ? 'badge-pendiente' : 'badge-pagado';
             html += '<tr>' +
               '<td><b>' + f.cliente + '</b></td>' +
-              (destino === 'tablaFacturas' ? '<td>' + celdaComercial(f) + '</td>' : '') +
+              (destino === 'tablaFacturas' ? '<td>' + celdaComercialFactura(f) + '</td>' : '') +
               '<td>' + (f.nit || '-') + '</td>' +
               '<td>' + celdaMes(f) + '</td>' +
               '<td title="' + esc(f.observaciones || '') + '">' + esc(f.consumo || '-') + '</td>' +
@@ -1594,20 +1692,21 @@ app.get('/', (req, res) => {
           let totalGeneral = 0;
 
           data.forEach(function (f) {
-            if (!mapa[f.cliente]) { mapa[f.cliente] = Array(12).fill(0); comerciales_c[f.cliente] = f.responsable; }
+            const clave = f.cliente + '||' + (f.responsable || 'N/A');
+            if (!mapa[clave]) { mapa[clave] = Array(12).fill(0); comerciales_c[clave] = { cliente: f.cliente, responsable: f.responsable }; }
             // Si el mes asignado cae en otro año, se deja en el mes real de la factura para no perder el valor
             const anoSel = periodoFact ? String(periodoFact.ano) : document.getElementById('selAno').value;
             const idx =(f.anoMes === undefined || String(f.anoMes) === anoSel) ? f.numMes : f.numMesFactura;
-            mapa[f.cliente][idx] += f.valor;
+            mapa[clave][idx] += f.valor;
             totalGeneral += f.valor;
           });
 
           let html = '';
-          Object.keys(mapa).forEach(function (cliente) {
-            const meses = mapa[cliente];
+          Object.keys(mapa).forEach(function (clave) {
+            const meses = mapa[clave];
             const totalCliente = meses.reduce(function (a, b) { return a + b; }, 0);
-            html += '<tr><td><b>' + cliente + '</b></td>' +
-              '<td>' + celdaComercial({ responsable: comerciales_c[cliente] }) + '</td>' +
+            html += '<tr><td><b>' + comerciales_c[clave].cliente + '</b></td>' +
+              '<td>' + celdaComercial({ responsable: comerciales_c[clave].responsable }) + '</td>' +
               meses.map(function (m) { return '<td>' + (m > 0 ? fmt(m) : '-') + '</td>'; }).join('') +
               '<td><b>' + fmt(totalCliente) + '</b></td></tr>';
           });
