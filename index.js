@@ -609,7 +609,7 @@ async function facturasDeEmpresa(emp, desde, hasta, refrescar) {
       vencimiento: f.payments && f.payments[0] ? f.payments[0].due_date || '-' : '-',
       condicion: saldo > 0 ? 'PENDIENTE' : 'PAGADO',
       fechaPago: saldo === 0 ? f.date : '-',
-      responsable: comFactura || comercialCliente,
+      responsable: comFactura === 'SIN COMERCIAL' ? 'N/A' : (comFactura || comercialCliente),
       comercialCliente,
       comercialFactura: comFactura,
       formaPago: sinFormaPago ? 'SIN FORMA DE PAGO' : (f.payments || []).map(p => p.name || p.id).filter(Boolean).join(', '),
@@ -900,7 +900,7 @@ app.put('/api/facturas/:empresaId/:facturaId/comercial', async (req, res) => {
   const facturaId = String(req.params.facturaId || '').trim();
   const comercial = String((req.body && req.body.comercial) || '').trim();
   if (!emp || !facturaId) return res.status(400).json({ success: false, error: 'Empresa o factura no válida' });
-  if (comercial && !COMERCIALES.includes(comercial)) return res.status(400).json({ success: false, error: 'Comercial no válido' });
+  if (comercial && comercial !== 'SIN COMERCIAL' && !COMERCIALES.includes(comercial)) return res.status(400).json({ success: false, error: 'Comercial no válido' });
   try {
     await persistirComercialFactura(`${emp.id}:${facturaId}`, comercial);
     res.json({ success: true });
@@ -1626,11 +1626,12 @@ app.get('/', (req, res) => {
           const porCliente = (!f.comercialCliente || f.comercialCliente === 'N/A') ? 'SIN COMERCIAL' : f.comercialCliente;
           const cambiado = !!f.comercialFactura;
           const lista = COMERCIALES_FIJOS.slice();
-          if (cambiado && lista.indexOf(f.comercialFactura) < 0) lista.push(f.comercialFactura);
+          if (cambiado && f.comercialFactura !== 'SIN COMERCIAL' && lista.indexOf(f.comercialFactura) < 0) lista.push(f.comercialFactura);
           return '<select class="inp-comercial' + (cambiado ? ' cambiado' : '') + '" data-emp="' + esc(f.empresaId) + '" data-id="' + esc(f.id) + '" ' +
             'title="' + (cambiado ? 'Comercial elegido solo para esta factura' : 'Comercial del cliente (Terceros). Puedes cambiarlo solo para esta factura.') + '" onchange="cambiarComercial(this)">' +
-            '<option value=""' + (cambiado ? '' : ' selected') + '>' + (porCliente === 'SIN COMERCIAL' ? '— SIN ASIGNAR —' : esc(porCliente) + ' (cliente)') + '</option>' +
+            '<option value=""' + (cambiado ? '' : ' selected') + '>' + (porCliente === 'SIN COMERCIAL' ? '— SIN COMERCIAL —' : esc(porCliente) + ' (cliente)') + '</option>' +
             lista.map(function (n) { return '<option value="' + esc(n) + '"' + (cambiado && n === f.comercialFactura ? ' selected' : '') + '>' + esc(n) + '</option>'; }).join('') +
+            (porCliente === 'SIN COMERCIAL' ? '' : '<option value="SIN COMERCIAL"' + (f.comercialFactura === 'SIN COMERCIAL' ? ' selected' : '') + '>— SIN COMERCIAL —</option>') +
             '</select>';
         }
 
@@ -1649,11 +1650,11 @@ app.get('/', (req, res) => {
             });
             if (!res.ok) throw new Error('fallo');
             f.comercialFactura = valor;
-            f.responsable = valor || f.comercialCliente;
+            f.responsable = valor === 'SIN COMERCIAL' ? 'N/A' : (valor || f.comercialCliente);
             aplicarFiltros();
             const cont = document.getElementById('avisoEmpresas');
             cont.className = 'aviso';
-            cont.innerHTML = 'Factura <b>' + esc(f.numero) + '</b>: comercial <b>' + esc(valor || (f.comercialCliente === 'N/A' ? 'SIN COMERCIAL' : f.comercialCliente) + ' (del cliente)') + '</b>.';
+            cont.innerHTML = 'Factura <b>' + esc(f.numero) + '</b>: comercial <b>' + esc(valor || ((f.comercialCliente === 'N/A' ? 'SIN COMERCIAL' : f.comercialCliente) + ' (del cliente)')) + '</b>.';
           } catch (e) {
             sel.value = f.comercialFactura || '';
             alert('No se pudo guardar el comercial de la factura');
