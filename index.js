@@ -958,25 +958,25 @@ app.get('/', (req, res) => {
       <meta charset="UTF-8">
       <title>AutenTIC - Control Facturación Clientes</title>
       <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f6f9; margin: 0; padding: 20px; color: #333; }
-        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; background: white; padding: 15px 25px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-        .logo { font-size: 26px; font-weight: bold; color: #002d5b; display: flex; align-items: center; gap: 8px; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f6f9; margin: 0; padding: 14px; color: #333; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; background: white; padding: 10px 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+        .logo { font-size: 20px; font-weight: bold; color: #002d5b; display: flex; align-items: center; gap: 8px; }
         .kpi-box { text-align: right; }
         .kpi-title { font-size: 11px; color: #666; text-transform: uppercase; letter-spacing: 0.5px; }
-        .kpi-value { font-size: 22px; font-weight: bold; color: #002d5b; }
+        .kpi-value { font-size: 18px; font-weight: bold; color: #002d5b; }
 
-        .filters-container { display: flex; gap: 10px; background: white; padding: 15px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); flex-wrap: wrap; }
-        .filters-container select { flex: 1; min-width: 175px; padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; color: #334155; background: #fff; }
+        .filters-container { display: flex; gap: 8px; background: white; padding: 10px 12px; border-radius: 8px; margin-bottom: 12px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); flex-wrap: wrap; }
+        .filters-container select { flex: 1; min-width: 150px; padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 12px; color: #334155; background: #fff; }
         .filters-container select.server { border-color: #002d5b; font-weight: 600; }
 
-        .tabs { display: flex; gap: 10px; margin-bottom: 20px; }
-        .tab-btn { padding: 10px 24px; border: none; background: #e2e8f0; cursor: pointer; border-radius: 6px; font-weight: bold; color: #475569; transition: all 0.2s; }
+        .tabs { display: flex; gap: 8px; margin-bottom: 12px; }
+        .tab-btn { padding: 8px 16px; font-size: 12px; border: none; background: #e2e8f0; cursor: pointer; border-radius: 6px; font-weight: bold; color: #475569; transition: all 0.2s; }
         .tab-btn.active { background: #002d5b; color: white; }
 
         .table-container { background: #fff; border-radius: 8px; overflow-x: auto; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
         table { width: 100%; border-collapse: collapse; text-align: left; }
-        th { background: #1f2937; color: white; padding: 12px 16px; font-size: 12px; font-weight: 600; text-transform: uppercase; white-space: nowrap; }
-        td { padding: 12px 16px; border-bottom: 1px solid #f1f5f9; font-size: 13px; white-space: nowrap; }
+        th { background: #1f2937; color: white; padding: 8px 10px; font-size: 11px; font-weight: 600; text-transform: uppercase; white-space: nowrap; }
+        td { padding: 6px 10px; border-bottom: 1px solid #f1f5f9; font-size: 12px; white-space: nowrap; }
         tr:hover { background-color: #f8fafc; }
 
         .badge-pendiente { background: #fef3c7; color: #d97706; padding: 4px 10px; border-radius: 4px; font-weight: bold; font-size: 11px; }
@@ -986,25 +986,29 @@ app.get('/', (req, res) => {
         .form-container { background: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
         .form-container input, .form-container select { padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; }
         .btn-submit { background: #002d5b; color: white; border: none; padding: 10px; border-radius: 6px; font-weight: bold; cursor: pointer; grid-column: 1 / -1; }
-              .aviso { background: #ecfdf5; color: #065f46; padding: 10px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 12px; }
+              .aviso { background: #ecfdf5; color: #065f46; padding: 7px 12px; border-radius: 8px; margin-bottom: 10px; font-size: 11px; }
         .aviso:empty { display: none; }
         .chk { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #334155; white-space: nowrap; cursor: pointer; }
-        .sel-mes { padding: 4px 6px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 12px; background: #fff; color: #334155; }
+        .sel-mes { padding: 3px 5px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 11px; background: #fff; color: #334155; }
         .sel-mes.cambiado { border-color: #d97706; background: #fffbeb; font-weight: 600; }
         .aviso.aviso-error { background: #fef2f2; color: #b91c1c; }
         .filters-container input[type=text], .filters-container input[type=number], .filters-container input[type=date] { flex: 1; min-width: 175px; padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; color: #334155; background: #fff; }
-        .nota-vista { background: #eff6ff; color: #1e40af; padding: 10px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 12px; }
+        .nota-vista { background: #eff6ff; color: #1e40af; padding: 7px 12px; border-radius: 8px; margin-bottom: 10px; font-size: 11px; }
+        td.num { text-align: right; }
+        #viewConsolidado th:not(:first-child) { text-align: right; }
+        #tablaConsolidado td:first-child { white-space: normal; min-width: 180px; max-width: 280px; }
+        tr.fila-total td { background: #e2e8f0; font-weight: 700; border-top: 2px solid #1f2937; color: #0f172a; }
         .filters-container input.buscar { flex: 2; min-width: 220px; padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; }
         .btn-small { background: #002d5b; color: white; border: none; padding: 8px 14px; border-radius: 6px; font-weight: bold; font-size: 12px; cursor: pointer; }
-        .inp-comercial { width: 290px; padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 12px; }
+        .inp-comercial { width: 250px; padding: 4px 8px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 11px; }
         .inp-comercial.cambiado { border-color: #d97706; background: #fffbeb; font-weight: 600; }
 
         /* ---------- Estructura global: menú lateral + páginas ---------- */
         .app { display: flex; gap: 20px; align-items: flex-start; }
-        .sidebar { width: 240px; flex: 0 0 240px; background: #002d5b; color: #fff; border-radius: 8px; padding: 18px 0; position: sticky; top: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.08); }
-        .sidebar .brand { padding: 2px 20px 16px; font-size: 22px; font-weight: 700; border-bottom: 1px solid rgba(255,255,255,0.12); margin-bottom: 8px; }
-        .nav-grupo { padding: 16px 20px 6px; font-size: 11px; letter-spacing: 0.8px; color: #8fb0d6; text-transform: uppercase; }
-        .nav-item { display: block; padding: 12px 20px; color: #cfe0f5; text-decoration: none; font-weight: 600; font-size: 14px; border-left: 4px solid transparent; }
+        .sidebar { width: 190px; flex: 0 0 190px; background: #002d5b; color: #fff; border-radius: 8px; padding: 18px 0; position: sticky; top: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.08); }
+        .sidebar .brand { padding: 2px 16px 12px; font-size: 18px; font-weight: 700; border-bottom: 1px solid rgba(255,255,255,0.12); margin-bottom: 8px; }
+        .nav-grupo { padding: 12px 16px 4px; font-size: 11px; letter-spacing: 0.8px; color: #8fb0d6; text-transform: uppercase; }
+        .nav-item { display: block; padding: 9px 16px; color: #cfe0f5; text-decoration: none; font-weight: 600; font-size: 13px; border-left: 4px solid transparent; }
         .nav-item:hover { background: rgba(255,255,255,0.08); color: #fff; }
         .nav-item.activo { background: rgba(255,255,255,0.14); color: #fff; border-left-color: #38bdf8; }
         .contenido { flex: 1; min-width: 0; }
@@ -1167,13 +1171,12 @@ app.get('/', (req, res) => {
 
       <!-- Vista Consolidado -->
       <div id="viewConsolidado" style="display:none;">
-        <div class="nota-vista">Valor bruto facturado por cliente y comercial, por mes, con los mismos filtros de Facturación (sin las ventas Wompi).</div>
+        <div class="nota-vista">Valor bruto facturado por cliente y por mes, con los mismos filtros de Facturación (sin las ventas Wompi). Para ver el consumo de un asesor, filtra por comercial.</div>
         <div class="table-container">
         <table>
           <thead>
             <tr>
               <th>CLIENTE</th>
-              <th>COMERCIAL</th>
               <th>ENERO</th>
               <th>FEBRERO</th>
               <th>MARZO</th>
@@ -1713,30 +1716,35 @@ app.get('/', (req, res) => {
 
         function renderConsolidado(data) {
           const mapa = {};
-          const comerciales_c = {};
+          const totalesMes = Array(12).fill(0);
           let totalGeneral = 0;
 
           data.forEach(function (f) {
-            const clave = f.cliente + '||' + (f.responsable || 'N/A');
-            if (!mapa[clave]) { mapa[clave] = Array(12).fill(0); comerciales_c[clave] = { cliente: f.cliente, responsable: f.responsable }; }
+            if (!mapa[f.cliente]) mapa[f.cliente] = Array(12).fill(0);
             // Si el mes asignado cae en otro año, se deja en el mes real de la factura para no perder el valor
             const anoSel = periodoFact ? String(periodoFact.ano) : document.getElementById('selAno').value;
-            const idx =(f.anoMes === undefined || String(f.anoMes) === anoSel) ? f.numMes : f.numMesFactura;
-            mapa[clave][idx] += f.valor;
+            const idx = (f.anoMes === undefined || String(f.anoMes) === anoSel) ? f.numMes : f.numMesFactura;
+            mapa[f.cliente][idx] += f.valor;
+            totalesMes[idx] += f.valor;
             totalGeneral += f.valor;
           });
 
           let html = '';
-          Object.keys(mapa).forEach(function (clave) {
-            const meses = mapa[clave];
+          Object.keys(mapa).forEach(function (cliente) {
+            const meses = mapa[cliente];
             const totalCliente = meses.reduce(function (a, b) { return a + b; }, 0);
-            html += '<tr><td><b>' + comerciales_c[clave].cliente + '</b></td>' +
-              '<td>' + celdaComercial({ responsable: comerciales_c[clave].responsable }) + '</td>' +
-              meses.map(function (m) { return '<td>' + (m > 0 ? fmt(m) : '-') + '</td>'; }).join('') +
-              '<td><b>' + fmt(totalCliente) + '</b></td></tr>';
+            html += '<tr><td><b>' + esc(cliente) + '</b></td>' +
+              meses.map(function (m) { return '<td class="num">' + (m > 0 ? fmt(m) : '-') + '</td>'; }).join('') +
+              '<td class="num"><b>' + fmt(totalCliente) + '</b></td></tr>';
           });
+          // Fila de totales por columna
+          if (html) {
+            html += '<tr class="fila-total"><td>TOTAL</td>' +
+              totalesMes.map(function (m) { return '<td class="num">' + (m !== 0 ? fmt(m) : '-') + '</td>'; }).join('') +
+              '<td class="num">' + fmt(totalGeneral) + '</td></tr>';
+          }
 
-          document.getElementById('tablaConsolidado').innerHTML = html || '<tr><td colspan="15" style="text-align:center;">Sin datos</td></tr>';
+          document.getElementById('tablaConsolidado').innerHTML = html || '<tr><td colspan="14" style="text-align:center;">Sin datos</td></tr>';
           document.getElementById('totalKPI').innerText = fmt(totalGeneral);
         }
 
