@@ -582,7 +582,14 @@ async function facturasDeEmpresa(emp, desde, hasta, refrescar) {
     const moValido = mo === 'WOMPI' || mo === 'FACTURACION';
     const nit = c.identification || '';
     const nombre = clientesCache.get(`${emp.id}:${c.id}`) || nombreDeCliente(c) || (nit ? `CLIENTE (${nit})` : 'N/A');
-    const saldo = Number(f.balance) || 0;
+    // Facturas en moneda extranjera (p. ej. USD): Siigo entrega los valores en esa moneda y la tasa de cambio en currency.exchange_rate.
+    // Todo se convierte a pesos con esa tasa; las facturas en COP quedan igual.
+    const moneda = String((f.currency && f.currency.code) || 'COP').toUpperCase();
+    const tasaApi = Number(f.currency && f.currency.exchange_rate);
+    const tasa = moneda !== 'COP' && tasaApi > 0 ? tasaApi : 1;
+    const aPesos = (n) => Math.round((Number(n) || 0) * tasa * 100) / 100;
+    const saldoOriginal = Number(f.balance) || 0;
+    const saldo = aPesos(saldoOriginal);
     const seller = f.seller;
     // Siigo a veces entrega solo el número del vendedor (339, 606...): eso no es un nombre, así que se ignora
     let nombreVendedor = '';
@@ -618,13 +625,17 @@ async function facturasDeEmpresa(emp, desde, hasta, refrescar) {
       esWompiAuto: autoWompi,
       moduloAsignado: moValido ? mo : '',
       tieneNotaCredito: !!nc,
-      notaCredito: nc ? nc.total : 0,
+      notaCredito: nc ? aPesos(nc.total) : 0,
       notasCredito: nc ? nc.nombres.join(', ') : '',
       consumo: extraerConsumo(f.observations),
       observaciones: f.observations || '',
-      valor: valorBruto(f),
-      total: Number(f.total) || 0,
+      valor: aPesos(valorBruto(f)),
+      total: aPesos(f.total),
       saldo,
+      moneda,
+      tasaCambio: tasa,
+      valorMonedaOriginal: moneda !== 'COP' ? valorBruto(f) : 0,
+      sinTasaCambio: moneda !== 'COP' && tasa === 1,
       empresa: emp.nombre
     };
   });
@@ -1662,6 +1673,14 @@ app.get('/', (req, res) => {
           sel.disabled = false;
         }
 
+        // Valor bruto en pesos; si la factura es en moneda extranjera se indica con la tasa usada
+        function celdaValor(f) {
+          const base = '<b>' + fmt(f.valor) + '</b>';
+          if (!f.moneda || f.moneda === 'COP') return base;
+          if (f.sinTasaCambio) return base + ' <span title="Factura en ' + esc(f.moneda) + ' sin tasa de cambio en Siigo: el valor puede estar en ' + esc(f.moneda) + '" style="color:#dc2626;font-size:11px;">⚠ ' + esc(f.moneda) + '</span>';
+          return base + ' <span title="' + esc(f.moneda) + ' ' + Number(f.valorMonedaOriginal || 0).toLocaleString('es-CO') + ' x tasa ' + Number(f.tasaCambio).toLocaleString('es-CO') + '" style="color:#0369a1;font-size:11px;">' + esc(f.moneda) + '→COP</span>';
+        }
+
         function renderFacturas(data, destino) {
           let html = '';
           let total = 0;
@@ -1679,7 +1698,7 @@ app.get('/', (req, res) => {
               '<td>' + f.vencimiento + '</td>' +
               '<td><span class="' + badgeClass + '">' + f.condicion + '</span></td>' +
               '<td>' + f.fechaPago + '</td>' +
-              '<td><b>' + fmt(f.valor) + '</b></td>' +
+              '<td>' + celdaValor(f) + '</td>' +
               '<td>' + fmt(f.total) + '</td>' +
               '<td>' + fmt(f.saldo) + '</td>' +
               '<td title="' + esc(f.notasCredito || '') + '">' + (f.tieneNotaCredito ? fmt(f.notaCredito) : '-') + '</td>' +
