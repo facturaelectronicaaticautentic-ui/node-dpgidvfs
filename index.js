@@ -584,7 +584,12 @@ async function facturasDeEmpresa(emp, desde, hasta, refrescar) {
     const nombre = clientesCache.get(`${emp.id}:${c.id}`) || nombreDeCliente(c) || (nit ? `CLIENTE (${nit})` : 'N/A');
     const saldo = Number(f.balance) || 0;
     const seller = f.seller;
-    const comercialCliente = asignaciones[String(nit).trim()] || (seller ? (seller.name || `${seller.first_name || ''} ${seller.last_name || ''}`.trim() || String(seller)) : 'N/A');
+    // Siigo a veces entrega solo el número del vendedor (339, 606...): eso no es un nombre, así que se ignora
+    let nombreVendedor = '';
+    if (seller && typeof seller === 'object') nombreVendedor = String(seller.name || `${seller.first_name || ''} ${seller.last_name || ''}`.trim() || '').trim();
+    else if (seller) nombreVendedor = String(seller).trim();
+    if (/^\d+$/.test(nombreVendedor)) nombreVendedor = '';
+    const comercialCliente = asignaciones[String(nit).trim()] || nombreVendedor || 'N/A';
     const comFactura = comercialesFactura[`${emp.id}:${f.id}`] || '';
 
     return {
