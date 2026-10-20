@@ -981,6 +981,7 @@ app.get('/', (req, res) => {
         .filters-container input.buscar { flex: 2; min-width: 220px; padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; }
         .btn-small { background: #002d5b; color: white; border: none; padding: 8px 14px; border-radius: 6px; font-weight: bold; font-size: 12px; cursor: pointer; }
         .inp-comercial { width: 290px; padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 12px; }
+        .inp-comercial.cambiado { border-color: #d97706; background: #fffbeb; font-weight: 600; }
 
         /* ---------- Estructura global: menú lateral + páginas ---------- */
         .app { display: flex; gap: 20px; align-items: flex-start; }
@@ -1060,7 +1061,7 @@ app.get('/', (req, res) => {
         <select id="selAno" class="server"></select>
         <select id="selMes" class="server"></select>
         <select id="filterCondicion"><option value="">CONDICIÓN (Todas)</option></select>
-        <select id="filterCliente"><option value="">CLIENTE (Todos)</option></select>
+        <input type="text" id="filterCliente" class="buscar" placeholder="Buscar cliente por nombre o NIT..." onkeydown="if (event.key === 'Enter') buscarFacturacion()" />
         <select id="filterResponsable"><option value="">RESPONSABLE / COMERCIAL (Todos)</option></select>
         <select id="filterEmpresa"><option value="">EMPRESA (Todas)</option></select>
         <label class="chk"><input type="checkbox" id="chkNC" /> Ver facturas con nota crédito <span id="cntNC"></span></label>
@@ -1431,7 +1432,6 @@ app.get('/', (req, res) => {
 
         function poblarFiltros(data) {
           poblarSelect('filterCondicion', data.map(function (d) { return d.condicion; }), 'CONDICIÓN (Todas)');
-          poblarSelect('filterCliente', data.map(function (d) { return d.cliente; }), 'CLIENTE (Todos)');
           const selR = document.getElementById('filterResponsable');
           const previoR = selR.value;
           poblarSelect('filterResponsable', COMERCIALES_FIJOS.concat(data.map(function (d) { return d.responsable; })), 'RESPONSABLE / COMERCIAL (Todos)');
@@ -1443,7 +1443,7 @@ app.get('/', (req, res) => {
 
         function aplicarFiltros() {
           const fCond = document.getElementById('filterCondicion').value;
-          const fCli = document.getElementById('filterCliente').value;
+          const fCli = document.getElementById('filterCliente').value.trim().toUpperCase();
           const fResp = document.getElementById('filterResponsable').value;
           const fEmp = document.getElementById('filterEmpresa').value;
           // Las facturas con nota crédito se ocultan, salvo que se marque "Ver facturas con nota crédito"
@@ -1453,7 +1453,7 @@ app.get('/', (req, res) => {
 
           const filtradas = facturasGlobales.filter(function (f) {
             return (!fCond || f.condicion === fCond) &&
-                   (!fCli || f.cliente === fCli) &&
+                   (!fCli || String(f.cliente).toUpperCase().indexOf(fCli) >= 0 || String(f.nit || '').indexOf(fCli) >= 0) &&
                    (!fResp || f.responsable === fResp) &&
                    (!fEmp || f.empresa === fEmp) &&
                    (verNC || !f.tieneNotaCredito);
@@ -1622,9 +1622,9 @@ app.get('/', (req, res) => {
           const cambiado = !!f.comercialFactura;
           const lista = COMERCIALES_FIJOS.slice();
           if (cambiado && lista.indexOf(f.comercialFactura) < 0) lista.push(f.comercialFactura);
-          return '<select class="sel-mes' + (cambiado ? ' cambiado' : '') + '" data-emp="' + esc(f.empresaId) + '" data-id="' + esc(f.id) + '" ' +
+          return '<select class="inp-comercial' + (cambiado ? ' cambiado' : '') + '" data-emp="' + esc(f.empresaId) + '" data-id="' + esc(f.id) + '" ' +
             'title="' + (cambiado ? 'Comercial elegido solo para esta factura' : 'Comercial del cliente (Terceros). Puedes cambiarlo solo para esta factura.') + '" onchange="cambiarComercial(this)">' +
-            '<option value=""' + (cambiado ? '' : ' selected') + '>' + esc(porCliente) + ' (cliente)</option>' +
+            '<option value=""' + (cambiado ? '' : ' selected') + '>' + (porCliente === 'SIN COMERCIAL' ? '— SIN ASIGNAR —' : esc(porCliente) + ' (cliente)') + '</option>' +
             lista.map(function (n) { return '<option value="' + esc(n) + '"' + (cambiado && n === f.comercialFactura ? ' selected' : '') + '>' + esc(n) + '</option>'; }).join('') +
             '</select>';
         }
