@@ -876,6 +876,7 @@ app.post('/api/contratos', (req, res) => {
 
 app.get('/', (req, res) => {
   const escHtml = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const COMERCIALES_JSON = JSON.stringify(COMERCIALES).replace(/</g, '\\u003c');
   const OPCIONES_EMPRESA = empresas.map(e => '<option value="' + escHtml(e.nombre) + '">' + escHtml(e.nombre) + '</option>').join('');
   res.send(`
     <!DOCTYPE html>
@@ -1003,7 +1004,7 @@ app.get('/', (req, res) => {
         <select id="selMes" class="server"></select>
         <select id="filterCondicion"><option value="">CONDICIÓN (Todas)</option></select>
         <select id="filterCliente"><option value="">CLIENTE (Todos)</option></select>
-        <select id="filterResponsable"><option value="">RESPONSABLE (Todos)</option></select>
+        <select id="filterResponsable"><option value="">RESPONSABLE / COMERCIAL (Todos)</option></select>
         <select id="filterEmpresa"><option value="">EMPRESA (Todas)</option></select>
         <label class="chk"><input type="checkbox" id="chkNC" /> Ver facturas con nota crédito <span id="cntNC"></span></label>
         <button class="btn-small" id="btnBuscarFact" onclick="buscarFacturacion()">🔍 BUSCAR / ACTUALIZAR</button>
@@ -1027,6 +1028,7 @@ app.get('/', (req, res) => {
           <thead>
             <tr>
               <th>CLIENTE</th>
+              <th>COMERCIAL</th>
               <th>NIT</th>
               <th>MES</th>
               <th>CONSUMO MES</th>
@@ -1097,6 +1099,7 @@ app.get('/', (req, res) => {
           <thead>
             <tr>
               <th>CLIENTE</th>
+              <th>COMERCIAL</th>
               <th>ENERO</th>
               <th>FEBRERO</th>
               <th>MARZO</th>
@@ -1192,11 +1195,12 @@ app.get('/', (req, res) => {
         let tabActual = 'facturacion';
         let tercerosGlobales = [];
         let comerciales = [];
+        const COMERCIALES_FIJOS = ${COMERCIALES_JSON};
         let recargarFacturas = false;
         let wompiGlobales = [];
         let periodoFact = null;   // { ano, mes } de la última búsqueda de Facturación
         let periodoWompi = null;  // { ano, mes } de la última búsqueda de Wompi
-        const MSG_FACT = '<tr><td colspan="16" style="text-align:center;">Elige los filtros y presiona 🔍 BUSCAR / ACTUALIZAR.</td></tr>';
+        const MSG_FACT = '<tr><td colspan="17" style="text-align:center;">Elige los filtros y presiona 🔍 BUSCAR / ACTUALIZAR.</td></tr>';
         const MSG_WOMPI = '<tr><td colspan="16" style="text-align:center;">Elige Año, Mes, Día y Empresa y presiona 🔍 BUSCAR / ACTUALIZAR WOMPI.</td></tr>';
 
         function esc(s) {
@@ -1253,6 +1257,7 @@ app.get('/', (req, res) => {
           wDia.innerHTML = '<option value="">DÍA (Todos)</option>';
           for (let d = 1; d <= 31; d++) wDia.innerHTML += '<option value="' + d + '">DÍA ' + d + '</option>';
 
+          poblarFiltros([]);
           document.getElementById('tablaFacturas').innerHTML = MSG_FACT;
           document.getElementById('tablaWompi').innerHTML = MSG_WOMPI;
         }
@@ -1370,7 +1375,12 @@ app.get('/', (req, res) => {
         function poblarFiltros(data) {
           poblarSelect('filterCondicion', data.map(function (d) { return d.condicion; }), 'CONDICIÓN (Todas)');
           poblarSelect('filterCliente', data.map(function (d) { return d.cliente; }), 'CLIENTE (Todos)');
-          poblarSelect('filterResponsable', data.map(function (d) { return d.responsable; }), 'RESPONSABLE (Todos)');
+          const selR = document.getElementById('filterResponsable');
+          const previoR = selR.value;
+          poblarSelect('filterResponsable', COMERCIALES_FIJOS.concat(data.map(function (d) { return d.responsable; })), 'RESPONSABLE / COMERCIAL (Todos)');
+          const o = document.createElement('option'); o.value = 'N/A'; o.textContent = 'SIN COMERCIAL';
+          selR.appendChild(o);
+          if (previoR === 'N/A') selR.value = 'N/A';
           poblarSelect('filterEmpresa', data.map(function (d) { return d.empresa; }), 'EMPRESA (Todas)');
         }
 
@@ -1543,6 +1553,11 @@ app.get('/', (req, res) => {
                  String(a.empresa).localeCompare(String(b.empresa));
         }
 
+        // Comercial asignado al cliente (ver pestaña Terceros)
+        function celdaComercial(f) {
+          return (!f.responsable || f.responsable === 'N/A') ? '<span style="color:#94a3b8;">SIN COMERCIAL</span>' : esc(f.responsable);
+        }
+
         function renderFacturas(data, destino) {
           let html = '';
           let total = 0;
@@ -1551,6 +1566,7 @@ app.get('/', (req, res) => {
             const badgeClass = f.condicion === 'PENDIENTE' ? 'badge-pendiente' : 'badge-pagado';
             html += '<tr>' +
               '<td><b>' + f.cliente + '</b></td>' +
+              (destino === 'tablaFacturas' ? '<td>' + celdaComercial(f) + '</td>' : '') +
               '<td>' + (f.nit || '-') + '</td>' +
               '<td>' + celdaMes(f) + '</td>' +
               '<td title="' + esc(f.observaciones || '') + '">' + esc(f.consumo || '-') + '</td>' +
@@ -1574,10 +1590,11 @@ app.get('/', (req, res) => {
 
         function renderConsolidado(data) {
           const mapa = {};
+          const comerciales_c = {};
           let totalGeneral = 0;
 
           data.forEach(function (f) {
-            if (!mapa[f.cliente]) mapa[f.cliente] = Array(12).fill(0);
+            if (!mapa[f.cliente]) { mapa[f.cliente] = Array(12).fill(0); comerciales_c[f.cliente] = f.responsable; }
             // Si el mes asignado cae en otro año, se deja en el mes real de la factura para no perder el valor
             const anoSel = periodoFact ? String(periodoFact.ano) : document.getElementById('selAno').value;
             const idx =(f.anoMes === undefined || String(f.anoMes) === anoSel) ? f.numMes : f.numMesFactura;
@@ -1590,11 +1607,12 @@ app.get('/', (req, res) => {
             const meses = mapa[cliente];
             const totalCliente = meses.reduce(function (a, b) { return a + b; }, 0);
             html += '<tr><td><b>' + cliente + '</b></td>' +
+              '<td>' + celdaComercial({ responsable: comerciales_c[cliente] }) + '</td>' +
               meses.map(function (m) { return '<td>' + (m > 0 ? fmt(m) : '-') + '</td>'; }).join('') +
               '<td><b>' + fmt(totalCliente) + '</b></td></tr>';
           });
 
-          document.getElementById('tablaConsolidado').innerHTML = html || '<tr><td colspan="14" style="text-align:center;">Sin datos</td></tr>';
+          document.getElementById('tablaConsolidado').innerHTML = html || '<tr><td colspan="15" style="text-align:center;">Sin datos</td></tr>';
           document.getElementById('totalKPI').innerText = fmt(totalGeneral);
         }
 
