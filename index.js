@@ -1021,6 +1021,14 @@ app.get('/', (req, res) => {
         .tarjeta h3 { margin: 0 0 8px; font-size: 18px; color: #002d5b; }
         .tarjeta p { margin: 0; font-size: 13px; color: #64748b; }
         .vacio { background: #fff; border-radius: 8px; padding: 40px 30px; text-align: center; color: #64748b; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+        .sidebar { transition: width 0.2s, flex-basis 0.2s; overflow: hidden; }
+        .nav-toggle { display: block; width: calc(100% - 24px); margin: 0 12px 6px; padding: 6px 8px; background: rgba(255,255,255,0.1); color: #cfe0f5; border: none; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; text-align: left; white-space: nowrap; }
+        .nav-toggle:hover { background: rgba(255,255,255,0.2); color: #fff; }
+        .app.menu-cerrado .sidebar { width: 52px; flex-basis: 52px; }
+        .app.menu-cerrado .sidebar .txt, .app.menu-cerrado .sidebar .nav-grupo { display: none; }
+        .app.menu-cerrado .sidebar .brand { padding: 2px 0 12px; text-align: center; }
+        .app.menu-cerrado .nav-item { padding: 10px 0; text-align: center; border-left-width: 3px; }
+        .app.menu-cerrado .nav-toggle { width: 36px; margin: 0 8px 6px; text-align: center; padding: 6px 0; }
         @media (max-width: 800px) {
           .app { flex-direction: column; }
           .sidebar { width: auto; flex: none; position: static; align-self: stretch; }
@@ -1031,12 +1039,13 @@ app.get('/', (req, res) => {
       <div class="app">
         <!-- Menú lateral: Inicio, y debajo los módulos (Comercial primero, Cartera después) -->
         <aside class="sidebar">
-          <div class="brand">📐 AutenTIC</div>
+          <div class="brand"><span class="ico">📐</span><span class="txt"> AutenTIC</span></div>
+          <button class="nav-toggle" id="btnMenu" onclick="alternarMenu()" title="Contraer menú">« Contraer menú</button>
           <nav>
-            <a class="nav-item activo" id="navInicio" href="#/inicio">🏠 Inicio</a>
+            <a class="nav-item activo" id="navInicio" href="#/inicio" title="Inicio"><span class="ico">🏠</span><span class="txt"> Inicio</span></a>
             <div class="nav-grupo">Módulos</div>
-            <a class="nav-item" id="navComercial" href="#/comercial/facturacion">💼 Módulo Comercial</a>
-            <a class="nav-item" id="navCartera" href="#/cartera">💰 Módulo de Cartera</a>
+            <a class="nav-item" id="navComercial" href="#/comercial/facturacion" title="Módulo Comercial"><span class="ico">💼</span><span class="txt"> Módulo Comercial</span></a>
+            <a class="nav-item" id="navCartera" href="#/cartera" title="Módulo de Cartera"><span class="ico">💰</span><span class="txt"> Módulo de Cartera</span></a>
           </nav>
         </aside>
 
@@ -1896,6 +1905,20 @@ app.get('/', (req, res) => {
 
         // ---------- Rutas: #/inicio, #/comercial/<área>, #/cartera ----------
         const AREAS_COMERCIAL = { 'facturacion': 'facturacion', 'ventas-wompi': 'wompi', 'consolidado': 'consolidado', 'contratos': 'contratos', 'terceros': 'terceros' };
+
+        // Menú lateral contraíble: la preferencia se recuerda en este navegador
+        function aplicarMenu(cerrado) {
+          document.querySelector('.app').classList.toggle('menu-cerrado', cerrado);
+          const b = document.getElementById('btnMenu');
+          b.textContent = cerrado ? '»' : '« Contraer menú';
+          b.title = cerrado ? 'Expandir menú' : 'Contraer menú';
+        }
+        function alternarMenu() {
+          const cerrado = !document.querySelector('.app').classList.contains('menu-cerrado');
+          aplicarMenu(cerrado);
+          try { localStorage.setItem('menuCerrado', cerrado ? '1' : '0'); } catch (e) { /* sin almacenamiento */ }
+        }
+        try { if (localStorage.getItem('menuCerrado') === '1') aplicarMenu(true); } catch (e) { /* sin almacenamiento */ }
 
         function irA(ruta) { location.hash = '#/' + ruta; }
 
