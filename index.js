@@ -885,6 +885,54 @@ app.get('/api/formas-pago', async (req, res) => {
   res.type('json').send(JSON.stringify(salida, null, 2));
 });
 
+// GET /api/buscar-factura?numero=10058,10057,9576[&prefijo=FV-2]
+// Busca esas facturas directamente en Siigo (ambas empresas) y explica por qué aparecen o no en el portal.
+app.get('/api/buscar-factura', async (req, res) => {
+  await asignacionesListas;
+  await sincronizarRemoto();
+  const numeros = String(req.query.numero || '').split(/[,;\s]+/).map(x => x.trim()).filter(Boolean).slice(0, 10);
+  const prefijos = req.query.prefijo ? [String(req.query.prefijo)] : ['FV-2', 'FV-1', 'FV-3'];
+  const salida = [];
+  for (const emp of empresas) {
+    if (!emp.user || !emp.key) { salida.push({ empresa: emp.nombre, error: 'Faltan credenciales' }); continue; }
+    try {
+      const token = await getToken(emp);
+      for (const n of numeros) {
+        let f = null;
+        const probados = [];
+        for (const pre of prefijos) {
+          const nombre = `${pre}-${n}`;
+          probados.push(nombre);
+          const data = await siigoGet('/v1/invoices', { name: nombre }, token);
+          const r = (data.results || [])[0];
+          if (r) { f = r; break; }
+        }
+        if (!f) { salida.push({ empresa: emp.nombre, numero: n, encontrada: false, probados }); continue; }
+        const nc = await notasCreditoPorFactura(emp, token, f.date, false);
+        const conNC = nc.porId.get(String(f.id)) || nc.porNombre.get(String(f.name));
+        const formas = (f.payments || []).map(p => p.name || p.id).filter(Boolean);
+        const mo = modulosAsignados[`${emp.id}:${f.id}`];
+        const esWompi = (mo === 'WOMPI' || mo === 'FACTURACION') ? mo === 'WOMPI' : (formas.length === 0 || (f.payments || []).some(esPagoWompi));
+        const ov = mesesAsignados[`${emp.id}:${f.id}`];
+        const periodo = ov || String(f.date).slice(0, 7);
+        const motivos = [];
+        motivos.push(`Se ve al consultar AÑO ${periodo.slice(0, 4)} y MES ${MESES[Number(periodo.slice(5, 7)) - 1]} (o "Todo el año")${ov ? ' — mes asignado a mano' : ''}.`);
+        motivos.push(esWompi ? 'Va en la pestaña VENTAS WOMPI.' : 'Va en la pestaña FACTURACIÓN.');
+        if (conNC) motivos.push('Está OCULTA porque tiene nota crédito (marca "Ver facturas con nota crédito" para verla).');
+        if (f.annulled) motivos.push('Está ANULADA en Siigo.');
+        salida.push({
+          empresa: emp.nombre, numero: n, encontrada: true, nombre: f.name, fecha: f.date,
+          formaDePago: formas.join(', ') || '(sin forma de pago)', total: f.total, saldo: f.balance, anulada: !!f.annulled,
+          notaCredito: conNC ? conNC.nombres.join(', ') : null, motivos
+        });
+      }
+    } catch (e) {
+      salida.push({ empresa: emp.nombre, error: describirError(e) });
+    }
+  }
+  res.type('json').send(JSON.stringify(salida, null, 2));
+});
+
 // PUT /api/facturas/:empresaId/:facturaId/modulo   body: { modulo: "WOMPI" | "FACTURACION" }   (vacío = clasificación automática)
 app.put('/api/facturas/:empresaId/:facturaId/modulo', async (req, res) => {
   await asignacionesListas;
@@ -1090,7 +1138,7 @@ app.get('/', (req, res) => {
         <select id="selAno" class="server"></select>
         <select id="selMes" class="server"></select>
         <select id="filterCondicion"><option value="">CONDICIÓN (Todas)</option></select>
-        <input type="text" id="filterCliente" class="buscar" placeholder="Buscar cliente por nombre o NIT..." onkeydown="if (event.key === 'Enter') buscarFacturacion()" />
+        <input type="text" id="filterCliente" class="buscar" placeholder="Buscar por cliente, NIT o No. factura..." onkeydown="if (event.key === 'Enter') buscarFacturacion()" />
         <select id="filterResponsable"><option value="">RESPONSABLE / COMERCIAL (Todos)</option></select>
         <select id="filterEmpresa"><option value="">EMPRESA (Todas)</option></select>
         <label class="chk"><input type="checkbox" id="chkNC" /> Ver facturas con nota crédito <span id="cntNC"></span></label>
@@ -1481,7 +1529,7 @@ app.get('/', (req, res) => {
 
           const filtradas = facturasGlobales.filter(function (f) {
             return (!fCond || f.condicion === fCond) &&
-                   (!fCli || String(f.cliente).toUpperCase().indexOf(fCli) >= 0 || String(f.nit || '').indexOf(fCli) >= 0) &&
+                   (!fCli || String(f.cliente).toUpperCase().indexOf(fCli) >= 0 || String(f.nit || '').indexOf(fCli) >= 0 || String(f.numero).toUpperCase().indexOf(fCli) >= 0) &&
                    (!fResp || f.responsable === fResp) &&
                    (!fEmp || f.empresa === fEmp) &&
                    (verNC || !f.tieneNotaCredito);
@@ -1955,4 +2003,4 @@ app.get('/', (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Servidor AutenTIC corriendo en el puerto ${PORT}`);
-}); 
+});
