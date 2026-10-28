@@ -1041,6 +1041,12 @@ app.get('/', (req, res) => {
         .sel-mes.cambiado { border-color: #d97706; background: #fffbeb; font-weight: 600; }
         .aviso.aviso-error { background: #fef2f2; color: #b91c1c; }
         .filters-container input[type=text], .filters-container input[type=number], .filters-container input[type=date] { flex: 1; min-width: 175px; padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; color: #334155; background: #fff; }
+        .multi { position: relative; flex: 1; min-width: 150px; }
+        .multi-btn { width: 100%; box-sizing: border-box; text-align: left; padding: 6px 24px 6px 10px; border: 1px solid #002d5b; border-radius: 6px; font-size: 12px; font-weight: 600; color: #334155; background: #fff; cursor: pointer; position: relative; }
+        .multi-btn::after { content: '▾'; position: absolute; right: 9px; top: 6px; }
+        .multi-panel { position: absolute; top: 100%; left: 0; z-index: 30; margin-top: 4px; min-width: 100%; background: #fff; border: 1px solid #cbd5e1; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.12); padding: 6px 4px; }
+        .multi-panel label { display: flex; align-items: center; gap: 8px; padding: 5px 10px; font-size: 12px; color: #334155; cursor: pointer; white-space: nowrap; }
+        .multi-panel label:hover { background: #f1f5f9; }
         .nota-vista { background: #eff6ff; color: #1e40af; padding: 7px 12px; border-radius: 8px; margin-bottom: 10px; font-size: 11px; }
         td.num { text-align: right; }
         #viewConsolidado th:not(:first-child) { text-align: right; }
@@ -1135,7 +1141,10 @@ app.get('/', (req, res) => {
       </div>
 
       <div class="filters-container" id="barraFiltros">
-        <select id="selAno" class="server"></select>
+        <div class="multi" id="boxAnos">
+          <button type="button" class="multi-btn" id="btnAnos" onclick="alternarPanelAnos()">AÑO</button>
+          <div class="multi-panel" id="panelAnos" style="display:none;"></div>
+        </div>
         <select id="selMes" class="server"></select>
         <select id="filterCondicion"><option value="">CONDICIÓN (Todas)</option></select>
         <input type="text" id="filterCliente" class="buscar" placeholder="Buscar por cliente, NIT o No. factura..." onkeydown="if (event.key === 'Enter') buscarFacturacion()" />
@@ -1365,10 +1374,15 @@ app.get('/', (req, res) => {
 
         function iniciarSelectoresFecha() {
           const hoy = new Date();
-          const selAno = document.getElementById('selAno');
+          const panelAnos = document.getElementById('panelAnos');
           for (let y = hoy.getFullYear(); y >= 2022; y--) {
-            selAno.innerHTML += '<option value="' + y + '">AÑO ' + y + '</option>';
+            panelAnos.innerHTML += '<label><input type="checkbox" class="chk-ano" value="' + y + '"' + (y === hoy.getFullYear() ? ' checked' : '') + ' onchange="cambioAnos(this)" /> ' + y + '</label>';
           }
+          actualizarEtiquetaAnos();
+          document.addEventListener('click', function (e) {
+            const caja = document.getElementById('boxAnos');
+            if (caja && !caja.contains(e.target)) document.getElementById('panelAnos').style.display = 'none';
+          });
           const selMes = document.getElementById('selMes');
           selMes.innerHTML = '<option value="">MES (Todo el año)</option>';
           NOMBRES_MES.forEach(function (m, i) {
@@ -1396,27 +1410,65 @@ app.get('/', (req, res) => {
           document.getElementById('tablaWompi').innerHTML = MSG_WOMPI;
         }
 
-        // ¿La factura cae dentro del periodo consultado?
+        // Años marcados en el selector de Facturación (de menor a mayor)
+        function anosSeleccionados() {
+          return Array.from(document.querySelectorAll('#panelAnos .chk-ano:checked')).map(function (c) { return c.value; }).sort();
+        }
+        function actualizarEtiquetaAnos() {
+          const a = anosSeleccionados();
+          document.getElementById('btnAnos').textContent = a.length === 1 ? 'AÑO ' + a[0] : (a.length <= 3 ? 'AÑOS ' + a.join(', ') : a.length + ' AÑOS');
+        }
+        function alternarPanelAnos() {
+          const p = document.getElementById('panelAnos');
+          p.style.display = p.style.display === 'none' ? 'block' : 'none';
+        }
+        function cambioAnos(chk) {
+          // Siempre debe quedar al menos un año marcado
+          if (anosSeleccionados().length === 0) chk.checked = true;
+          actualizarEtiquetaAnos();
+        }
+
+        // ¿La factura cae dentro del periodo consultado? (per.ano puede ser un año o una lista de años)
         function enPeriodo(f, per) {
           if (!per) return false;
+          const anos = [].concat(per.ano).map(String);
           const ef = f.mesAsignado || String(f.fecha).slice(0, 7);
-          return ef.slice(0, 4) === String(per.ano) && (!per.mes || Number(ef.slice(5, 7)) === Number(per.mes));
+          return anos.indexOf(ef.slice(0, 4)) >= 0 && (!per.mes || Number(ef.slice(5, 7)) === Number(per.mes));
         }
 
         // Búsqueda de Facturación / Consolidado: consulta Siigo solo cuando el operador lo confirma
         async function cargarFacturas() {
-          const ano = document.getElementById('selAno').value;
+          const anos = anosSeleccionados();
           const mes = document.getElementById('selMes').value;
           const btn = document.getElementById('btnBuscarFact');
           btn.disabled = true;
-          document.getElementById('tablaFacturas').innerHTML = '<tr><td colspan="16" style="text-align:center;">Consultando Siigo...</td></tr>';
+          document.getElementById('panelAnos').style.display = 'none';
+          document.getElementById('tablaFacturas').innerHTML = '<tr><td colspan="17" style="text-align:center;">Consultando Siigo' + (anos.length > 1 ? ' (' + anos.length + ' años, uno por uno)' : '') + '...</td></tr>';
           let resumen = [];
           try {
-            const res = await fetch('/api/facturas?ano=' + ano + (mes ? '&mes=' + mes : ''));
-            const data = await res.json();
-            facturasGlobales = data.facturas || [];
-            resumen = data.resumen || [];
-            periodoFact = { ano: ano, mes: mes };
+            // Un año a la vez, para no saturar a Siigo
+            let todas = [];
+            const porEmpresa = {};
+            for (let i = 0; i < anos.length; i++) {
+              const res = await fetch('/api/facturas?ano=' + anos[i] + (mes ? '&mes=' + mes : ''));
+              const data = await res.json();
+              todas = todas.concat(data.facturas || []);
+              (data.resumen || []).forEach(function (r) {
+                const x = porEmpresa[r.empresa] || (porEmpresa[r.empresa] = { empresa: r.empresa, cantidad: 0, error: null, nota: '' });
+                x.cantidad += r.cantidad || 0;
+                if (r.error) x.error = (x.error ? x.error + ' | ' : '') + (anos.length > 1 ? anos[i] + ': ' : '') + r.error;
+                if (r.nota) x.nota = (x.nota ? x.nota + ' ' : '') + (anos.length > 1 ? anos[i] + ': ' : '') + r.nota;
+              });
+            }
+            todas.sort(function (a, b) { return (b.consecutivo || 0) - (a.consecutivo || 0); });
+            facturasGlobales = todas;
+            resumen = Object.keys(porEmpresa).map(function (k) {
+              const x = porEmpresa[k];
+              const nums = todas.filter(function (f) { return f.empresa === x.empresa && f.consecutivo; }).map(function (f) { return f.consecutivo; });
+              x.rango = nums.length ? Math.min.apply(null, nums) + '–' + Math.max.apply(null, nums) : '';
+              return x;
+            });
+            periodoFact = { ano: anos, mes: mes };
             recargarFacturas = false;
           } catch (e) {
             facturasGlobales = [];
@@ -1431,9 +1483,9 @@ app.get('/', (req, res) => {
 
         // Botón BUSCAR / ACTUALIZAR: si cambió el año o el mes se consulta Siigo; si no, solo se aplican los filtros
         function buscarFacturacion() {
-          const ano = document.getElementById('selAno').value;
+          const anos = anosSeleccionados();
           const mes = document.getElementById('selMes').value;
-          const igual = periodoFact && periodoFact.ano === ano && periodoFact.mes === mes;
+          const igual = periodoFact && periodoFact.ano.join(',') === anos.join(',') && periodoFact.mes === mes;
           if (igual && !recargarFacturas && facturasGlobales.length) { aplicarFiltros(); } else { cargarFacturas(); }
         }
 
@@ -1777,11 +1829,14 @@ app.get('/', (req, res) => {
           let totalGeneral = 0;
 
           data.forEach(function (f) {
-            if (!mapa[f.cliente]) mapa[f.cliente] = Array(12).fill(0);
-            // Si el mes asignado cae en otro año, se deja en el mes real de la factura para no perder el valor
-            const anoSel = periodoFact ? String(periodoFact.ano) : document.getElementById('selAno').value;
-            const idx = (f.anoMes === undefined || String(f.anoMes) === anoSel) ? f.numMes : f.numMesFactura;
-            mapa[f.cliente][idx] += f.valor;
+            // Con un solo año, si el mes asignado cae en otro año se deja en el mes real de la factura para no perder el valor.
+            // Con varios años cada año va en su propia fila: "CLIENTE (2025)".
+            const anos = periodoFact ? periodoFact.ano : [];
+            const varios = anos.length > 1;
+            const idx = varios || f.anoMes === undefined || String(f.anoMes) === anos[0] ? f.numMes : f.numMesFactura;
+            const clave = varios ? f.cliente + ' (' + f.anoMes + ')' : f.cliente;
+            if (!mapa[clave]) mapa[clave] = Array(12).fill(0);
+            mapa[clave][idx] += f.valor;
             totalesMes[idx] += f.valor;
             totalGeneral += f.valor;
           });
