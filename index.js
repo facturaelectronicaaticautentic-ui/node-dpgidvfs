@@ -197,7 +197,39 @@ async function persistirComercialFactura(clave, valor) {
   try { fs.writeFileSync(ARCHIVO_COM_FACT, JSON.stringify(comercialesFactura, null, 2)); } catch (e) { /* hosting de solo lectura */ }
 }
 
-const asignacionesListas = Promise.all([cargarAsignaciones(), cargarMeses(), cargarModulos(), cargarComercialesFactura()]);
+// ---------- Condición (PAGADO / PENDIENTE) cambiada manualmente en una factura ----------
+// Guarda { "empresaId:facturaId": "PAGADO" | "PENDIENTE" } y manda sobre la condición calculada por el saldo
+const ARCHIVO_CONDICIONES = path.join(process.env.DATA_DIR || __dirname, 'condiciones.json');
+const CLAVE_CONDICIONES = 'autentic:condiciones';
+let condicionesManuales = {};
+try { condicionesManuales = JSON.parse(fs.readFileSync(ARCHIVO_CONDICIONES, 'utf8')); } catch (e) { condicionesManuales = {}; }
+
+async function cargarCondiciones() {
+  if (!ALMACEN_REMOTO) return;
+  try {
+    const remoto = hashAObjeto(await redis(['HGETALL', CLAVE_CONDICIONES]));
+    for (const [k, v] of Object.entries(condicionesManuales)) {
+      if (!remoto[k]) {
+        try { await redis(['HSET', CLAVE_CONDICIONES, k, v]); remoto[k] = v; } catch (e) { /* se reintenta en el próximo arranque */ }
+      }
+    }
+    condicionesManuales = remoto;
+    console.log(`Condiciones de facturas cargadas desde Upstash: ${Object.keys(remoto).length}`);
+  } catch (e) {
+    console.error('No se pudieron leer las condiciones de Upstash:', e.message);
+  }
+}
+
+async function persistirCondicion(clave, valor) {
+  if (ALMACEN_REMOTO) {
+    await redis(valor ? ['HSET', CLAVE_CONDICIONES, clave, valor] : ['HDEL', CLAVE_CONDICIONES, clave]);
+  }
+  if (valor) condicionesManuales[clave] = valor;
+  else delete condicionesManuales[clave];
+  try { fs.writeFileSync(ARCHIVO_CONDICIONES, JSON.stringify(condicionesManuales, null, 2)); } catch (e) { /* hosting de solo lectura */ }
+}
+
+const asignacionesListas = Promise.all([cargarAsignaciones(), cargarMeses(), cargarModulos(), cargarComercialesFactura(), cargarCondiciones()]);
 
 function hashAObjeto(r) {
   const o = {};
@@ -213,11 +245,12 @@ async function sincronizarRemoto(forzar) {
   if (!ALMACEN_REMOTO) return;
   if (!forzar && Date.now() - ultimoSync < 3000) return;
   try {
-    const [a, m, mo, cf] = await Promise.all([redis(['HGETALL', CLAVE_ASIGNACIONES]), redis(['HGETALL', CLAVE_MESES]), redis(['HGETALL', CLAVE_MODULOS]), redis(['HGETALL', CLAVE_COM_FACT])]);
+    const [a, m, mo, cf, co] = await Promise.all([redis(['HGETALL', CLAVE_ASIGNACIONES]), redis(['HGETALL', CLAVE_MESES]), redis(['HGETALL', CLAVE_MODULOS]), redis(['HGETALL', CLAVE_COM_FACT]), redis(['HGETALL', CLAVE_CONDICIONES])]);
     asignaciones = hashAObjeto(a);
     mesesAsignados = hashAObjeto(m);
     modulosAsignados = hashAObjeto(mo);
     comercialesFactura = hashAObjeto(cf);
+    condicionesManuales = hashAObjeto(co);
     ultimoSync = Date.now();
   } catch (e) {
     console.error('No se pudo sincronizar con Upstash (se usa lo que hay en memoria):', e.message);
@@ -614,7 +647,9 @@ async function facturasDeEmpresa(emp, desde, hasta, refrescar) {
       consecutivo: Number(f.number) || Number((String(f.name || '').match(/(\d+)\s*$/) || [])[1]) || 0,
       fecha: f.date,
       vencimiento: f.payments && f.payments[0] ? f.payments[0].due_date || '-' : '-',
-      condicion: saldo > 0 ? 'PENDIENTE' : 'PAGADO',
+      condicion: (condicionesManuales[`${emp.id}:${f.id}`] === 'PAGADO' || condicionesManuales[`${emp.id}:${f.id}`] === 'PENDIENTE') ? condicionesManuales[`${emp.id}:${f.id}`] : (saldo > 0 ? 'PENDIENTE' : 'PAGADO'),
+      condicionAuto: saldo > 0 ? 'PENDIENTE' : 'PAGADO',
+      condicionManual: condicionesManuales[`${emp.id}:${f.id}`] || '',
       fechaPago: saldo === 0 ? f.date : '-',
       responsable: comFactura === 'SIN COMERCIAL' ? 'N/A' : (comFactura || comercialCliente),
       comercialCliente,
@@ -790,7 +825,8 @@ app.get('/api/estado', async (req, res) => {
     asignacionesEnMemoria: Object.keys(asignaciones).length,
     mesesEnMemoria: Object.keys(mesesAsignados).length,
     modulosEnMemoria: Object.keys(modulosAsignados).length,
-    comercialesFacturaEnMemoria: Object.keys(comercialesFactura).length
+    comercialesFacturaEnMemoria: Object.keys(comercialesFactura).length,
+    condicionesEnMemoria: Object.keys(condicionesManuales).length
   };
   if (ALMACEN_REMOTO) {
     try {
@@ -800,6 +836,7 @@ app.get('/api/estado', async (req, res) => {
       info.mesesEnUpstash = await redis(['HLEN', CLAVE_MESES]);
       info.modulosEnUpstash = await redis(['HLEN', CLAVE_MODULOS]);
       info.comercialesFacturaEnUpstash = await redis(['HLEN', CLAVE_COM_FACT]);
+      info.condicionesEnUpstash = await redis(['HLEN', CLAVE_CONDICIONES]);
     } catch (e) {
       info.conexion = 'ERROR: ' + e.message;
     }
@@ -933,6 +970,24 @@ app.get('/api/buscar-factura', async (req, res) => {
   res.type('json').send(JSON.stringify(salida, null, 2));
 });
 
+// PUT /api/facturas/:empresaId/:facturaId/condicion   body: { condicion: "PAGADO" | "PENDIENTE" }   (vacío = vuelve a la condición según el saldo)
+app.put('/api/facturas/:empresaId/:facturaId/condicion', async (req, res) => {
+  await asignacionesListas;
+  await sincronizarRemoto();
+  const emp = empresas.find(e => String(e.id) === String(req.params.empresaId));
+  const facturaId = String(req.params.facturaId || '').trim();
+  const condicion = String((req.body && req.body.condicion) || '').trim().toUpperCase();
+  if (!emp || !facturaId) return res.status(400).json({ success: false, error: 'Empresa o factura no válida' });
+  if (condicion && condicion !== 'PAGADO' && condicion !== 'PENDIENTE') return res.status(400).json({ success: false, error: 'Condición no válida' });
+  try {
+    await persistirCondicion(`${emp.id}:${facturaId}`, condicion);
+    res.json({ success: true });
+  } catch (e) {
+    console.error('No se pudo guardar la condición de la factura:', e.message);
+    res.status(500).json({ success: false, error: 'No se pudo guardar la condición' });
+  }
+});
+
 // PUT /api/facturas/:empresaId/:facturaId/modulo   body: { modulo: "WOMPI" | "FACTURACION" }   (vacío = clasificación automática)
 app.put('/api/facturas/:empresaId/:facturaId/modulo', async (req, res) => {
   await asignacionesListas;
@@ -1055,6 +1110,10 @@ app.get('/', (req, res) => {
         .filters-container input.buscar { flex: 2; min-width: 220px; padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; }
         .btn-small { background: #002d5b; color: white; border: none; padding: 8px 14px; border-radius: 6px; font-weight: bold; font-size: 12px; cursor: pointer; }
         .inp-comercial { width: 250px; padding: 4px 8px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 11px; }
+        .sel-cond { padding: 3px 5px; border-radius: 6px; font-size: 11px; font-weight: bold; border: 1px solid transparent; cursor: pointer; }
+        .sel-cond.cond-pendiente { background: #fef3c7; color: #d97706; }
+        .sel-cond.cond-pagado { background: #dcfce7; color: #15803d; }
+        .sel-cond.cambiado { border-color: #d97706; }
         .inp-comercial.cambiado { border-color: #d97706; background: #fffbeb; font-weight: 600; }
 
         /* ---------- Estructura global: menú lateral + páginas ---------- */
@@ -1559,7 +1618,7 @@ app.get('/', (req, res) => {
         }
 
         function poblarFiltros(data) {
-          poblarSelect('filterCondicion', data.map(function (d) { return d.condicion; }), 'CONDICIÓN (Todas)');
+          poblarSelect('filterCondicion', ['PAGADO', 'PENDIENTE'].concat(data.map(function (d) { return d.condicion; })), 'CONDICIÓN (Todas)');
           const selR = document.getElementById('filterResponsable');
           const previoR = selR.value;
           poblarSelect('filterResponsable', COMERCIALES_FIJOS.concat(data.map(function (d) { return d.responsable; })), 'RESPONSABLE / COMERCIAL (Todos)');
@@ -1785,6 +1844,40 @@ app.get('/', (req, res) => {
           sel.disabled = false;
         }
 
+        // Condición: se puede cambiar a PAGADO o PENDIENTE; por defecto sale del saldo de Siigo
+        function celdaCondicion(f, badgeClass) {
+          if (!f.id || f.empresaId === undefined) return '<span class="' + badgeClass + '">' + esc(f.condicion) + '</span>';
+          const cambiado = !!f.condicionManual;
+          return '<select class="sel-cond ' + (f.condicion === 'PENDIENTE' ? 'cond-pendiente' : 'cond-pagado') + (cambiado ? ' cambiado' : '') + '" data-emp="' + esc(f.empresaId) + '" data-id="' + esc(f.id) + '" ' +
+            'title="' + (cambiado ? 'Condición cambiada manualmente (según Siigo: ' + esc(f.condicionAuto) + ')' : 'Condición según el saldo de Siigo. Puedes cambiarla.') + '" onchange="cambiarCondicion(this)">' +
+            '<option value="PENDIENTE"' + (f.condicion === 'PENDIENTE' ? ' selected' : '') + '>PENDIENTE</option>' +
+            '<option value="PAGADO"' + (f.condicion === 'PAGADO' ? ' selected' : '') + '>PAGADO</option></select>';
+        }
+
+        async function cambiarCondicion(sel) {
+          const f = buscarFactura(sel.getAttribute('data-emp'), sel.getAttribute('data-id'));
+          if (!f) return;
+          const nuevo = sel.value;
+          // Si coincide con lo que dice Siigo, se quita el cambio manual
+          const valor = nuevo === f.condicionAuto ? '' : nuevo;
+          sel.disabled = true;
+          try {
+            const res = await fetch('/api/facturas/' + encodeURIComponent(f.empresaId) + '/' + encodeURIComponent(f.id) + '/condicion', {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ condicion: valor })
+            });
+            if (!res.ok) throw new Error('fallo');
+            f.condicionManual = valor;
+            f.condicion = nuevo;
+            aplicarFiltros();
+          } catch (e) {
+            sel.value = f.condicion;
+            alert('No se pudo guardar la condición de la factura');
+          }
+          sel.disabled = false;
+        }
+
         // Valor bruto en pesos; si la factura es en moneda extranjera se indica con la tasa usada
         function celdaValor(f) {
           const base = '<b>' + fmt(f.valor) + '</b>';
@@ -1808,7 +1901,7 @@ app.get('/', (req, res) => {
               '<td>' + f.numero + '</td>' +
               '<td>' + f.fecha + '</td>' +
               '<td>' + f.vencimiento + '</td>' +
-              '<td><span class="' + badgeClass + '">' + f.condicion + '</span></td>' +
+              '<td>' + celdaCondicion(f, badgeClass) + '</td>' +
               '<td>' + f.fechaPago + '</td>' +
               '<td>' + celdaValor(f) + '</td>' +
               '<td>' + fmt(f.total) + '</td>' +
