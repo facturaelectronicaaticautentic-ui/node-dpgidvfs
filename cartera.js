@@ -1,8 +1,5 @@
 // cartera.js - Módulo "Cuentas por Cobrar" (Cartera)
 // Se sirve como archivo estático desde Express y se ejecuta en el navegador.
-// Expone dos funciones globales:
-//   montarEstructuraCartera(contenedorId)  -> inyecta el HTML en el contenedor
-//   inicializarCartera(datos)              -> recibe facturasGlobales, llena filtros y pinta la tabla
 
 (function () {
     'use strict';
@@ -20,8 +17,11 @@
       const st = document.createElement('style');
       st.id = 'estilosCartera';
       st.textContent = `
-        .cxc-header { background:#fff; padding:14px 20px; border-radius:8px; margin-bottom:14px; box-shadow:0 2px 4px rgba(0,0,0,0.05); }
+        .cxc-header { background:#fff; padding:14px 20px; border-radius:8px; margin-bottom:14px; box-shadow:0 2px 4px rgba(0,0,0,0.05); display:flex; justify-content:space-between; align-items:center; }
         .cxc-header h1 { margin:0; font-size:22px; color:#002d5b; letter-spacing:0.5px; }
+        .cxc-btn-actualizar { background:#002d5b; color:#fff; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; font-weight:bold; transition: background 0.3s; }
+        .cxc-btn-actualizar:hover { background:#004080; }
+        .cxc-btn-actualizar:disabled { background:#94a3b8; cursor:not-allowed; }
         .cxc-kpis { display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px; margin-bottom:14px; }
         .cxc-kpi { background:#fff; border-radius:8px; padding:14px 18px; box-shadow:0 2px 4px rgba(0,0,0,0.05); border-left:5px solid #002d5b; }
         .cxc-kpi.vencido { border-left-color:#dc2626; }
@@ -33,7 +33,7 @@
         .cxc-kpi .c { font-size:11px; color:#64748b; margin-top:2px; }
         .cxc-dias-neg { color:#dc2626; font-weight:bold; }
         .cxc-dias-pos { color:#15803d; font-weight:bold; }
-        .cxc-nota { background:#eff6ff; color:#1e40af; padding:7px 12px; border-radius:8px; margin-bottom:10px; font-size:11px; }
+        .cxc-nota { background:#eff6ff; color:#1e40af; padding:7px 12px; border-radius:8px; margin-bottom:10px; font-size:11px; transition: all 0.3s ease; }
       `;
       document.head.appendChild(st);
     }
@@ -46,7 +46,10 @@
       contenedorActual = cont;
   
       cont.innerHTML = `
-        <div class="cxc-header"><h1>CUENTAS POR COBRAR</h1></div>
+        <div class="cxc-header">
+          <h1>CUENTAS POR COBRAR</h1>
+          <button id="btnActualizarCartera" class="cxc-btn-actualizar">Cargar Cartera desde Siigo</button>
+        </div>
   
         <div class="filters-container">
           <select id="cxcEmpresa"><option value="">EMPRESA (Todas)</option></select>
@@ -76,7 +79,7 @@
           </div>
         </div>
   
-        <div class="cxc-nota" id="cxcNota"></div>
+        <div class="cxc-nota" id="cxcNota">Presiona "Cargar Cartera desde Siigo" para traer la información actualizada.</div>
   
         <div class="table-container">
           <table>
@@ -86,7 +89,7 @@
                 <th>Cliente</th>
                 <th>Documento</th>
                 <th>Fecha venci...</th>
-                <th style="text-align:right;">Total cartera</th>
+                <th style="text-align:right;">Saldo Pendiente</th>
                 <th style="text-align:right;">Días</th>
               </tr>
             </thead>
@@ -98,115 +101,33 @@
       ['cxcEmpresa', 'cxcCliente', 'cxcEstado'].forEach(function (id) {
         document.getElementById(id).addEventListener('change', renderizarCartera);
       });
+
+      // Evento para consultar directamente a Siigo vía el backend
+      document.getElementById('btnActualizarCartera').addEventListener('click', cargarCarteraDesdeSiigo);
     }
   
-    // ---------- Utilidades de fecha / monto ----------
-    // Días = fecha de vencimiento - hoy. Negativo = vencida; positivo o cero = dentro del plazo.
-    function calcularDias(vencimiento) {
-      if (!vencimiento || !/^\d{4}-\d{2}-\d{2}/.test(String(vencimiento))) return null;
-      const [y, m, d] = String(vencimiento).slice(0, 10).split('-').map(Number);
-      const venc = Date.UTC(y, m - 1, d);
-      const h = new Date();
-      const hoy = Date.UTC(h.getFullYear(), h.getMonth(), h.getDate());
-      return Math.round((venc - hoy) / 86400000);
-    }
-  
-    // Monto de cartera: solo las facturas PENDIENTES aportan saldo
-    function montoCartera(f) {
-      if (f.condicion !== 'PENDIENTE') return 0;
-      const saldo = Number(f.saldo) || 0;
-      // Si el usuario marcó PENDIENTE manualmente y Siigo trae saldo 0, se usa el total de la factura
-      return saldo > 0 ? saldo : (Number(f.total) || 0);
-    }
-  
-    // ---------- 2. Lógica de datos ----------
-    function poblarSelectCartera(id, valores, titulo) {
-      const sel = document.getElementById(id);
-      if (!sel) return;
-      const previo = sel.value;
-      sel.innerHTML = '<option value="">' + titulo + '</option>';
-      Array.from(new Set(valores.filter(Boolean))).sort(function (a, b) { return String(a).localeCompare(String(b)); })
-        .forEach(function (v) {
-          sel.innerHTML += '<option value="' + escC(v) + '">' + escC(v) + '</option>';
-        });
-      if (previo && Array.from(sel.options).some(function (o) { return o.value === previo; })) sel.value = previo;
-    }
-  
-    function inicializarCartera(datos) {
-      if (!document.getElementById('cxcTabla')) montarEstructuraCartera('pgCartera');
-  
-      // Las facturas con nota crédito se excluyen, igual que en el resto del portal
-      datosCartera = (Array.isArray(datos) ? datos : []).filter(function (f) { return !f.tieneNotaCredito; });
-  
-      poblarSelectCartera('cxcEmpresa', datosCartera.map(function (f) { return f.empresa; }), 'EMPRESA (Todas)');
-      poblarSelectCartera('cxcCliente', datosCartera.map(function (f) { return f.cliente; }), 'CLIENTE (Todos)');
-      renderizarCartera();
-    }
-  
-    // ---------- 3. Render + cálculos en tiempo real ----------
-    function renderizarCartera() {
-      const fEmp = document.getElementById('cxcEmpresa').value;
-      const fCli = document.getElementById('cxcCliente').value;
-      const fEst = document.getElementById('cxcEstado').value;
-  
-      const filas = datosCartera
-        .filter(function (f) {
-          return (!fEmp || f.empresa === fEmp) &&
-                 (!fCli || f.cliente === fCli) &&
-                 (!fEst || f.condicion === fEst);
-        })
-        .map(function (f) {
-          return { f: f, dias: calcularDias(f.vencimiento), monto: montoCartera(f) };
-        })
-        // Más vencidas primero; las que no tienen fecha de vencimiento al final
-        .sort(function (a, b) {
-          const da = a.dias === null ? Infinity : a.dias;
-          const db = b.dias === null ? Infinity : b.dias;
-          return da - db;
-        });
-  
-      let total = 0, vencidos = 0, plazo = 0, nVenc = 0, nPlazo = 0;
-      filas.forEach(function (r) {
-        total += r.monto;
-        // Vencido: días negativos. Plazo: días positivos o cero (sin fecha de vencimiento se cuenta como plazo)
-        if (r.dias !== null && r.dias < 0) { vencidos += r.monto; nVenc++; }
-        else { plazo += r.monto; nPlazo++; }
-      });
-  
-      document.getElementById('cxcKpiTotal').textContent = fmtCOP(total);
-      document.getElementById('cxcKpiVencidos').textContent = fmtCOP(vencidos);
-      document.getElementById('cxcKpiPlazo').textContent = fmtCOP(plazo);
-      document.getElementById('cxcCntTotal').textContent = filas.length + ' documentos';
-      document.getElementById('cxcCntVencidos').textContent = nVenc + ' documentos';
-      document.getElementById('cxcCntPlazo').textContent = nPlazo + ' documentos';
-  
-      const LIMITE = 500;
-      let html = '';
-      filas.slice(0, LIMITE).forEach(function (r, i) {
-        const f = r.f;
-        const claseDias = r.dias === null ? '' : (r.dias < 0 ? 'cxc-dias-neg' : 'cxc-dias-pos');
-        html += '<tr>' +
-          '<td>' + (i + 1) + '</td>' +
-          '<td><b>' + escC(f.cliente) + '</b></td>' +
-          '<td>' + escC(f.numero) + '</td>' +
-          '<td>' + escC(f.vencimiento || '-') + '</td>' +
-          '<td class="num">' + fmtCOP(r.monto) + '</td>' +
-          '<td class="num ' + claseDias + '">' + (r.dias === null ? '-' : r.dias) + '</td>' +
-          '</tr>';
-      });
-      if (filas.length > LIMITE) {
-        html += '<tr><td colspan="6" style="text-align:center;color:#64748b;">Mostrando los primeros ' + LIMITE + ' de ' + filas.length + '. Usa los filtros para acotar.</td></tr>';
-      }
-      document.getElementById('cxcTabla').innerHTML = html ||
-        '<tr><td colspan="6" style="text-align:center;">' +
-        (datosCartera.length ? 'Sin datos con los filtros elegidos' : 'No hay facturas cargadas. Ve a Módulo Comercial > Facturación y presiona BUSCAR / ACTUALIZAR.') +
-        '</td></tr>';
-  
-      document.getElementById('cxcNota').textContent =
-        'Días = fecha de vencimiento − hoy (negativo = vencida). Los datos provienen de las facturas ya consultadas en el Módulo Comercial.';
-    }
-  
-    // Exponer al ámbito global
-    window.montarEstructuraCartera = montarEstructuraCartera;
-    window.inicializarCartera = inicializarCartera;
-  })();
+    // ---------- 2. Integración con el Backend (Siigo) ----------
+    async function cargarCarteraDesdeSiigo() {
+      const btn = document.getElementById('btnActualizarCartera');
+      const nota = document.getElementById('cxcNota');
+      
+      try {
+        btn.textContent = 'Consultando Siigo...';
+        btn.disabled = true;
+        nota.style.backgroundColor = '#fef08a'; // Amarillo de carga
+        nota.style.color = '#854d0e';
+        nota.textContent = 'Obteniendo reporte completo de cartera de Siigo. Esto puede tardar unos segundos...';
+
+        // IMPORTANTE: Asegúrate de que esta ruta coincida con el endpoint de tu servidor Express
+        const respuesta = await fetch('/api/siigo/cartera-pendiente');
+        
+        if (!respuesta.ok) throw new Error('Error de comunicación con el servidor: ' + respuesta.statusText);
+        
+        const data = await respuesta.json();
+        const facturas = Array.isArray(data) ? data : (data.facturas || []);
+
+        inicializarCartera(facturas);
+
+        nota.style.backgroundColor = '#dcfce7'; // Verde de éxito
+        nota.style.color = '#166534';
+        nota.textContent =
