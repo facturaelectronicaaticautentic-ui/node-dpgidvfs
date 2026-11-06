@@ -1,8 +1,9 @@
 // cartera.js - Módulo "Cuentas por Cobrar" (Cartera)
 // Se sirve como archivo estático desde Express y se ejecuta en el navegador.
-// Expone dos funciones globales:
-//   montarEstructuraCartera(contenedorId)  -> inyecta el HTML en el contenedor
-//   inicializarCartera(datos)              -> recibe facturasGlobales, llena filtros y pinta la tabla
+// Expone funciones globales:
+//   montarEstructuraCartera(contenedorId) -> inyecta el HTML en el contenedor
+//   inicializarCartera(datos?)            -> con datos los pinta; sin datos consulta /api/cartera (Siigo)
+//   cargarCartera()                       -> consulta /api/cartera y repinta
 
 (function () {
     'use strict';
@@ -34,6 +35,8 @@
         .cxc-dias-neg { color:#dc2626; font-weight:bold; }
         .cxc-dias-pos { color:#15803d; font-weight:bold; }
         .cxc-nota { background:#eff6ff; color:#1e40af; padding:7px 12px; border-radius:8px; margin-bottom:10px; font-size:11px; }
+        .cxc-btn { padding:8px 14px; background:#002d5b; color:#fff; border:none; border-radius:6px; cursor:pointer; font-weight:bold; }
+        .cxc-btn:disabled { opacity:0.6; cursor:wait; }
       `;
       document.head.appendChild(st);
     }
@@ -51,11 +54,7 @@
         <div class="filters-container">
           <select id="cxcEmpresa"><option value="">EMPRESA (Todas)</option></select>
           <select id="cxcCliente"><option value="">CLIENTE (Todos)</option></select>
-          <select id="cxcEstado">
-            <option value="PENDIENTE">ESTADO: PENDIENTE</option>
-            <option value="PAGADO">ESTADO: PAGADO</option>
-            <option value="">ESTADO (Todos)</option>
-          </select>
+          <button id="cxcActualizar" class="cxc-btn">↻ ACTUALIZAR DESDE SIIGO</button>
         </div>
   
         <div class="cxc-kpis">
@@ -95,9 +94,10 @@
         </div>
       `;
   
-      ['cxcEmpresa', 'cxcCliente', 'cxcEstado'].forEach(function (id) {
+      ['cxcEmpresa', 'cxcCliente'].forEach(function (id) {
         document.getElementById(id).addEventListener('change', renderizarCartera);
       });
+      document.getElementById('cxcActualizar').addEventListener('click', cargarCartera);
     }
   
     // ---------- Utilidades de fecha / monto ----------
@@ -111,12 +111,10 @@
       return Math.round((venc - hoy) / 86400000);
     }
   
-    // Monto de cartera: solo las facturas PENDIENTES aportan saldo
+    // El backend solo envía facturas con saldo pendiente (balance > 0)
     function montoCartera(f) {
-      if (f.condicion !== 'PENDIENTE') return 0;
-      const saldo = Number(f.saldo) || 0;
-      // Si el usuario marcó PENDIENTE manualmente y Siigo trae saldo 0, se usa el total de la factura
-      return saldo > 0 ? saldo : (Number(f.total) || 0);
+      const saldo = Number(f.saldo);
+      return saldo > 0 ? saldo : 0;
     }
   
     // ---------- 2. Lógica de datos ----------
@@ -125,35 +123,56 @@
       if (!sel) return;
       const previo = sel.value;
       sel.innerHTML = '<option value="">' + titulo + '</option>';
-      Array.from(new Set(valores.filter(Boolean))).sort(function (a, b) { return String(a).localeCompare(String(b)); })
+      Array.from(new Set(valores.filter(Boolean)))
+        .sort(function (a, b) { return String(a).localeCompare(String(b)); })
         .forEach(function (v) {
           sel.innerHTML += '<option value="' + escC(v) + '">' + escC(v) + '</option>';
         });
       if (previo && Array.from(sel.options).some(function (o) { return o.value === previo; })) sel.value = previo;
     }
   
-    function inicializarCartera(datos) {
+    async function cargarCartera() {
       if (!document.getElementById('cxcTabla')) montarEstructuraCartera('pgCartera');
+      const btn = document.getElementById('cxcActualizar');
+      const tabla = document.getElementById('cxcTabla');
+      if (btn) { btn.disabled = true; btn.textContent = 'Consultando Siigo...'; }
+      tabla.innerHTML = '<tr><td colspan="6" style="text-align:center;">Cargando cartera completa desde Siigo...</td></tr>';
   
-      // Las facturas con nota crédito se excluyen, igual que en el resto del portal
+      try {
+        const r = await fetch('/api/cartera');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const datos = await r.json();
+        aplicarDatos(datos);
+      } catch (e) {
+        console.error('cartera.js:', e);
+        tabla.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#dc2626;">No se pudo cargar la cartera: ' + escC(e.message) + '</td></tr>';
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = '↻ ACTUALIZAR DESDE SIIGO'; }
+      }
+    }
+  
+    function aplicarDatos(datos) {
       datosCartera = (Array.isArray(datos) ? datos : []).filter(function (f) { return !f.tieneNotaCredito; });
-  
       poblarSelectCartera('cxcEmpresa', datosCartera.map(function (f) { return f.empresa; }), 'EMPRESA (Todas)');
       poblarSelectCartera('cxcCliente', datosCartera.map(function (f) { return f.cliente; }), 'CLIENTE (Todos)');
       renderizarCartera();
+    }
+  
+    function inicializarCartera(datos) {
+      if (!document.getElementById('cxcTabla')) montarEstructuraCartera('pgCartera');
+      // Sin datos => consulta directamente a Siigo
+      if (!Array.isArray(datos)) { cargarCartera(); return; }
+      aplicarDatos(datos);
     }
   
     // ---------- 3. Render + cálculos en tiempo real ----------
     function renderizarCartera() {
       const fEmp = document.getElementById('cxcEmpresa').value;
       const fCli = document.getElementById('cxcCliente').value;
-      const fEst = document.getElementById('cxcEstado').value;
   
       const filas = datosCartera
         .filter(function (f) {
-          return (!fEmp || f.empresa === fEmp) &&
-                 (!fCli || f.cliente === fCli) &&
-                 (!fEst || f.condicion === fEst);
+          return (!fEmp || f.empresa === fEmp) && (!fCli || f.cliente === fCli) && montoCartera(f) > 0;
         })
         .map(function (f) {
           return { f: f, dias: calcularDias(f.vencimiento), monto: montoCartera(f) };
@@ -168,7 +187,7 @@
       let total = 0, vencidos = 0, plazo = 0, nVenc = 0, nPlazo = 0;
       filas.forEach(function (r) {
         total += r.monto;
-        // Vencido: días negativos. Plazo: días positivos o cero (sin fecha de vencimiento se cuenta como plazo)
+        // Vencido: días negativos. Plazo: días positivos o cero (sin fecha se cuenta como plazo)
         if (r.dias !== null && r.dias < 0) { vencidos += r.monto; nVenc++; }
         else { plazo += r.monto; nPlazo++; }
       });
@@ -199,14 +218,15 @@
       }
       document.getElementById('cxcTabla').innerHTML = html ||
         '<tr><td colspan="6" style="text-align:center;">' +
-        (datosCartera.length ? 'Sin datos con los filtros elegidos' : 'No hay facturas cargadas. Ve a Módulo Comercial > Facturación y presiona BUSCAR / ACTUALIZAR.') +
+        (datosCartera.length ? 'Sin datos con los filtros elegidos' : 'Sin cartera pendiente. Presiona ACTUALIZAR DESDE SIIGO.') +
         '</td></tr>';
   
       document.getElementById('cxcNota').textContent =
-        'Días = fecha de vencimiento − hoy (negativo = vencida). Los datos provienen de las facturas ya consultadas en el Módulo Comercial.';
+        'Días = fecha de vencimiento − hoy (negativo = vencida). Datos consultados directamente a Siigo (saldo pendiente de todas las facturas).';
     }
   
     // Exponer al ámbito global
     window.montarEstructuraCartera = montarEstructuraCartera;
     window.inicializarCartera = inicializarCartera;
+    window.cargarCartera = cargarCartera;
   })();
