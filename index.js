@@ -2139,7 +2139,7 @@ app.get('/', (req, res) => {
           document.getElementById('navCartera').classList.toggle('activo', pagina === 'cartera');
 
           // [LÍNEA 3 DE 3] Al entrar a Cartera se monta la vista y se carga con las facturas ya consultadas
-          if (pagina === 'cartera') { montarEstructuraCartera('pgCartera'); inicializarCartera(facturasGlobales); }
+          if (pagina === 'cartera') { montarEstructuraCartera('pgCartera'); inicializarCartera(); }
 
           if (pagina === 'comercial') {
             const tab = AREAS_COMERCIAL[partes[1]] || 'facturacion';
@@ -2159,4 +2159,134 @@ app.get('/', (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Servidor AutenTIC corriendo en el puerto ${PORT}`);
+});
+// ============================================================================
+// PEGAR EN index.js, justo ANTES de la línea:   // Endpoints para Contratos
+// ============================================================================
+
+// ---------- Cartera: TODAS las facturas con saldo pendiente de ambas empresas ----------
+// Siigo no expone el "Reporte de cartera" en su API; se arma recorriendo las facturas desde CARTERA_DESDE
+// (por defecto 2022-01-01, se cambia con la variable CARTERA_DESDE del .env) y quedándose con las que tienen saldo.
+const CARTERA_DESDE = /^\d{4}-\d{2}-\d{2}$/.test(process.env.CARTERA_DESDE || '') ? process.env.CARTERA_DESDE : '2022-01-01';
+let carteraCache = { ts: 0, data: null };
+let carteraEnCurso = null;
+
+async function carteraDeEmpresa(emp) {
+  const token = await getToken(emp);
+  if (!token) return { lista: [], nota: '' };
+
+  const hoy = new Date().toISOString().slice(0, 10);
+  const anoIni = Number(CARTERA_DESDE.slice(0, 4));
+  const anoFin = new Date().getFullYear();
+
+  // Un año a la vez (igual que Facturación) y sin duplicados en los bordes del rango
+  const porId = new Map();
+  for (let y = anoIni; y <= anoFin; y++) {
+    const desde = y === anoIni ? CARTERA_DESDE : `${y}-01-01`;
+    const hasta = y === anoFin ? hoy : `${y}-12-31`;
+    const parte = await traerFacturas(token, sumarDias(desde, -1), sumarDias(hasta, 1));
+    parte.forEach(f => porId.set(String(f.id), f));
+  }
+  const facturas = [...porId.values()].filter(f => !f.annulled);
+
+  // Moneda extranjera -> pesos (misma lógica que Facturación)
+  const aPesos = (f, n) => {
+    const moneda = String((f.currency && f.currency.code) || 'COP').toUpperCase();
+    const tasaApi = Number(f.currency && f.currency.exchange_rate);
+    const tasa = moneda !== 'COP' && tasaApi > 0 ? tasaApi : 1;
+    return Math.round((Number(n) || 0) * tasa * 100) / 100;
+  };
+
+  // Condición final: la manual (si la hay) manda sobre el saldo de Siigo
+  const pendientes = facturas.filter(f => {
+    const manual = condicionesManuales[`${emp.id}:${f.id}`];
+    if (manual === 'PAGADO') return false;
+    if (manual === 'PENDIENTE') return true;
+    return aPesos(f, f.balance) > 0;
+  });
+
+  const notas = [];
+  const avisoClientes = await resolverClientes(emp, token, pendientes);
+  if (avisoClientes) notas.push(avisoClientes);
+
+  let ncMapa = null;
+  try {
+    ncMapa = await notasCreditoPorFactura(emp, token, CARTERA_DESDE, false);
+  } catch (e) {
+    notas.push(`No se pudieron cargar las notas crédito (${describirError(e)}).`);
+  }
+
+  const lista = pendientes.map(f => {
+    const c = f.customer || {};
+    const nit = c.identification || '';
+    const nombre = clientesCache.get(`${emp.id}:${c.id}`) || nombreDeCliente(c) || (nit ? `CLIENTE (${nit})` : 'N/A');
+    const saldoSiigo = aPesos(f, f.balance);
+    const total = aPesos(f, f.total);
+    const nc = ncMapa ? (ncMapa.porId.get(String(f.id)) || ncMapa.porNombre.get(String(f.name))) : null;
+    const comFactura = comercialesFactura[`${emp.id}:${f.id}`] || '';
+    const nombreVend = f.seller && typeof f.seller === 'object' ? String(f.seller.name || '').trim() : '';
+    return {
+      id: f.id,
+      empresaId: emp.id,
+      empresa: emp.nombre,
+      cliente: nombre.toUpperCase(),
+      nit,
+      numero: f.name || f.id,
+      fecha: f.date,
+      vencimiento: (f.payments && f.payments[0] && f.payments[0].due_date) || '-',
+      total,
+      // Si el usuario marcó PENDIENTE a mano y Siigo trae saldo 0, se usa el total de la factura
+      saldo: saldoSiigo > 0 ? saldoSiigo : total,
+      condicion: 'PENDIENTE',
+      moneda: String((f.currency && f.currency.code) || 'COP').toUpperCase(),
+      responsable: comFactura === 'SIN COMERCIAL' ? 'N/A' : (comFactura || asignaciones[String(nit).trim()] || (/^\d+$/.test(nombreVend) ? '' : nombreVend) || 'N/A'),
+      tieneNotaCredito: !!nc,
+      notasCredito: nc ? nc.nombres.join(', ') : ''
+    };
+  });
+
+  return { lista, nota: notas.join(' '), revisadas: facturas.length };
+}
+
+async function construirCartera() {
+  const resultados = await Promise.all(empresas.map(async (emp) => {
+    if (!emp.user || !emp.key) {
+      return { empresa: emp.nombre, lista: [], error: `Faltan credenciales (EMPRESA${emp.id}_USER / EMPRESA${emp.id}_KEY) en el .env` };
+    }
+    try {
+      const r = await carteraDeEmpresa(emp);
+      return { empresa: emp.nombre, lista: r.lista, nota: r.nota, revisadas: r.revisadas, error: null };
+    } catch (e) {
+      const error = describirError(e);
+      console.error(`[${emp.nombre}] Error armando la cartera:`, error);
+      return { empresa: emp.nombre, lista: [], error };
+    }
+  }));
+  return {
+    cartera: resultados.flatMap(r => r.lista),
+    resumen: resultados.map(r => ({ empresa: r.empresa, cantidad: r.lista.length, revisadas: r.revisadas || 0, error: r.error, nota: r.nota || '' })),
+    desde: CARTERA_DESDE
+  };
+}
+
+// GET /api/cartera              -> usa caché de 10 min
+// GET /api/cartera?refrescar=1  -> vuelve a leer Siigo
+app.get('/api/cartera', async (req, res) => {
+  try {
+    await asignacionesListas;
+    await sincronizarRemoto();
+    const vigente = carteraCache.data && Date.now() - carteraCache.ts < 10 * 60 * 1000;
+    if (!req.query.refrescar && vigente) return res.json(carteraCache.data);
+
+    // Si ya hay una consulta en curso se espera esa misma (evita golpear a Siigo dos veces)
+    if (!carteraEnCurso) carteraEnCurso = construirCartera().finally(() => { carteraEnCurso = null; });
+    const data = await carteraEnCurso;
+
+    // Solo se cachea si ambas empresas respondieron bien
+    if (!data.resumen.some(r => r.error)) carteraCache = { ts: Date.now(), data };
+    res.json(data);
+  } catch (e) {
+    console.error('Error en /api/cartera:', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });

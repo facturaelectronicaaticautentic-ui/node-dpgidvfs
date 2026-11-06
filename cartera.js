@@ -97,7 +97,7 @@
       ['cxcEmpresa', 'cxcCliente'].forEach(function (id) {
         document.getElementById(id).addEventListener('change', renderizarCartera);
       });
-      document.getElementById('cxcActualizar').addEventListener('click', cargarCartera);
+      document.getElementById('cxcActualizar').addEventListener('click', function () { cargarCartera(true); });
     }
   
     // ---------- Utilidades de fecha / monto ----------
@@ -131,7 +131,7 @@
       if (previo && Array.from(sel.options).some(function (o) { return o.value === previo; })) sel.value = previo;
     }
   
-    async function cargarCartera() {
+    async function cargarCartera(forzar) {
       if (!document.getElementById('cxcTabla')) montarEstructuraCartera('pgCartera');
       const btn = document.getElementById('cxcActualizar');
       const tabla = document.getElementById('cxcTabla');
@@ -139,10 +139,22 @@
       tabla.innerHTML = '<tr><td colspan="6" style="text-align:center;">Cargando cartera completa desde Siigo...</td></tr>';
   
       try {
-        const r = await fetch('/api/cartera');
+        const r = await fetch('/api/cartera' + (forzar === true ? '?refrescar=1' : ''));
         if (!r.ok) throw new Error('HTTP ' + r.status);
-        const datos = await r.json();
-        aplicarDatos(datos);
+        const j = await r.json();
+        aplicarDatos(Array.isArray(j) ? j : (j.cartera || []));
+  
+        // Aviso por empresa (errores de Siigo o cargas incompletas)
+        const resumen = Array.isArray(j.resumen) ? j.resumen : [];
+        const nota = document.getElementById('cxcNota');
+        const detalle = resumen.map(function (x) {
+          return x.empresa + ': ' + (x.error ? '⚠ ' + x.error : x.cantidad + ' pendientes' + (x.nota ? ' (⚠ ' + x.nota + ')' : ''));
+        }).join(' | ');
+        if (nota && detalle) {
+          nota.textContent += ' Desde ' + (j.desde || '') + ' → ' + detalle;
+          if (resumen.some(function (x) { return x.error; })) { nota.style.background = '#fef2f2'; nota.style.color = '#b91c1c'; }
+          else { nota.style.background = ''; nota.style.color = ''; }
+        }
       } catch (e) {
         console.error('cartera.js:', e);
         tabla.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#dc2626;">No se pudo cargar la cartera: ' + escC(e.message) + '</td></tr>';
@@ -160,9 +172,11 @@
   
     function inicializarCartera(datos) {
       if (!document.getElementById('cxcTabla')) montarEstructuraCartera('pgCartera');
+      if (Array.isArray(datos) && datos.length) { aplicarDatos(datos); return; }
+      // Ya cargada antes: solo se repinta (para refrescar se usa el botón)
+      if (datosCartera.length) { aplicarDatos(datosCartera); return; }
       // Sin datos => consulta directamente a Siigo
-      if (!Array.isArray(datos)) { cargarCartera(); return; }
-      aplicarDatos(datos);
+      cargarCartera();
     }
   
     // ---------- 3. Render + cálculos en tiempo real ----------
