@@ -39,7 +39,7 @@ const COMERCIALES = (process.env.COMERCIALES
 // Se cambia con WOMPI_FORMAS_PAGO en el .env, separado por ;  (por defecto: cualquier forma de pago que contenga "WOMPI")
 // "Cruce de vencimiento" siempre se cuenta como venta Wompi, además de lo que se defina en WOMPI_FORMAS_PAGO.
 // Se comparan nombres sin tildes ni mayúsculas, y "contiene" (así también sirve "Cruce de vencimientos").
-const normalizarTexto = (t) => String(t == null ? '' : t).normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().trim();
+const normalizarTexto = (t) => String(t == null ? '' : t).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().trim();
 const WOMPI_FORMAS = ((process.env.WOMPI_FORMAS_PAGO || 'WOMPI') + ';CRUCE DE VENCIMIENTO')
   .split(';').map(normalizarTexto).filter(Boolean);
 function esPagoWompi(p) {
@@ -1050,6 +1050,9 @@ app.post('/api/contratos', (req, res) => {
   res.json({ success: true, contrato: nuevo });
 });
 
+// [LÍNEA 1 DE 3] Sirve el módulo de Cartera (cartera.js debe estar en la misma carpeta que index.js)
+app.get('/cartera.js', (req, res) => res.sendFile(path.join(__dirname, 'cartera.js')));
+
 app.get('/', (req, res) => {
   const escHtml = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const COMERCIALES_JSON = JSON.stringify(COMERCIALES).replace(/</g, '\\u003c');
@@ -1181,7 +1184,7 @@ app.get('/', (req, res) => {
             </div>
           </section>
 
-          <!-- Módulo de Cartera -->
+          <!-- Módulo de Cartera (cartera.js inyecta aquí su contenido) -->
           <section id="pgCartera" style="display:none;">
             <div class="bienvenida">
               <h1>Módulo de Cartera</h1>
@@ -1392,6 +1395,8 @@ app.get('/', (req, res) => {
         </div>
       </div>
 
+      <!-- [LÍNEA 2 DE 3] Módulo de Cartera (se carga antes del script principal) -->
+      <script src="/cartera.js"></script>
       <script>
         let facturasGlobales = [];
         let tabActual = 'facturacion';
@@ -2132,6 +2137,9 @@ app.get('/', (req, res) => {
           document.getElementById('navInicio').classList.toggle('activo', pagina === 'inicio');
           document.getElementById('navComercial').classList.toggle('activo', pagina === 'comercial');
           document.getElementById('navCartera').classList.toggle('activo', pagina === 'cartera');
+
+          // [LÍNEA 3 DE 3] Al entrar a Cartera se monta la vista y se carga con las facturas ya consultadas
+          if (pagina === 'cartera') { montarEstructuraCartera('pgCartera'); inicializarCartera(facturasGlobales); }
 
           if (pagina === 'comercial') {
             const tab = AREAS_COMERCIAL[partes[1]] || 'facturacion';
