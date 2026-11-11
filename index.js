@@ -34,11 +34,6 @@ const COMERCIALES = (process.env.COMERCIALES
 ).map(n => n.trim().toUpperCase()).filter(Boolean);
 
 // Formas de pago de Siigo que se consideran "ventas Wompi" (las que contabilizan en la cuenta 138095).
-// Siigo no entrega la contrapartida contable en la API, así que se clasifica por la forma de pago de la factura.
-// Cada elemento puede ser el NOMBRE (basta con que lo contenga) o el ID de la forma de pago.
-// Se cambia con WOMPI_FORMAS_PAGO en el .env, separado por ;  (por defecto: cualquier forma de pago que contenga "WOMPI")
-// "Cruce de vencimiento" siempre se cuenta como venta Wompi, además de lo que se defina en WOMPI_FORMAS_PAGO.
-// Se comparan nombres sin tildes ni mayúsculas, y "contiene" (así también sirve "Cruce de vencimientos").
 const normalizarTexto = (t) => String(t == null ? '' : t).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().trim();
 const WOMPI_FORMAS = ((process.env.WOMPI_FORMAS_PAGO || 'WOMPI') + ';CRUCE DE VENCIMIENTO')
   .split(';').map(normalizarTexto).filter(Boolean);
@@ -56,9 +51,6 @@ function guardarAsignaciones() {
 }
 
 // ---------- Almacenamiento permanente (Upstash Redis, gratis) ----------
-// Si defines UPSTASH_REDIS_REST_URL y UPSTASH_REDIS_REST_TOKEN en el .env, las asignaciones
-// se guardan allí y sobreviven a reinicios y despliegues. Sin eso se usa solo el archivo local.
-// También se aceptan los nombres que crea la integración de Upstash/KV de Vercel (KV_REST_API_URL / KV_REST_API_TOKEN)
 const UPSTASH_URL = (process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL || '').replace(/\/$/, '');
 const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN || '';
 const ALMACEN_REMOTO = !!(UPSTASH_URL && UPSTASH_TOKEN);
@@ -83,10 +75,9 @@ async function cargarAsignaciones() {
     } else if (r && typeof r === 'object') {
       Object.assign(remoto, r);
     }
-    // Lo que ya estaba en el archivo local y aún no está en la nube se sube una sola vez
     for (const [nit, com] of Object.entries(asignaciones)) {
       if (!remoto[nit]) {
-        try { await redis(['HSET', CLAVE_ASIGNACIONES, nit, com]); remoto[nit] = com; } catch (e) { /* se reintenta en el próximo arranque */ }
+        try { await redis(['HSET', CLAVE_ASIGNACIONES, nit, com]); remoto[nit] = com; } catch (e) { }
       }
     }
     asignaciones = remoto;
@@ -95,8 +86,8 @@ async function cargarAsignaciones() {
     console.error('No se pudieron leer las asignaciones de Upstash:', e.message);
   }
 }
+
 // ---------- Mes asignado manualmente a cada factura ----------
-// Guarda { "empresaId:facturaId": "YYYY-MM" } en Upstash (y en meses.json como respaldo local)
 const ARCHIVO_MESES = path.join(process.env.DATA_DIR || __dirname, 'meses.json');
 const CLAVE_MESES = 'autentic:meses';
 let mesesAsignados = {};
@@ -114,7 +105,7 @@ async function cargarMeses() {
     }
     for (const [k, v] of Object.entries(mesesAsignados)) {
       if (!remoto[k]) {
-        try { await redis(['HSET', CLAVE_MESES, k, v]); remoto[k] = v; } catch (e) { /* se reintenta en el próximo arranque */ }
+        try { await redis(['HSET', CLAVE_MESES, k, v]); remoto[k] = v; } catch (e) { }
       }
     }
     mesesAsignados = remoto;
@@ -130,11 +121,10 @@ async function persistirMes(clave, valor) {
   }
   if (valor) mesesAsignados[clave] = valor;
   else delete mesesAsignados[clave];
-  try { fs.writeFileSync(ARCHIVO_MESES, JSON.stringify(mesesAsignados, null, 2)); } catch (e) { /* hosting de solo lectura */ }
+  try { fs.writeFileSync(ARCHIVO_MESES, JSON.stringify(mesesAsignados, null, 2)); } catch (e) { }
 }
 
 // ---------- Módulo asignado manualmente a cada factura (FACTURACION o WOMPI) ----------
-// Guarda { "empresaId:facturaId": "WOMPI" | "FACTURACION" } y manda sobre la clasificación automática por forma de pago
 const ARCHIVO_MODULOS = path.join(process.env.DATA_DIR || __dirname, 'modulos.json');
 const CLAVE_MODULOS = 'autentic:modulos';
 let modulosAsignados = {};
@@ -146,7 +136,7 @@ async function cargarModulos() {
     const remoto = hashAObjeto(await redis(['HGETALL', CLAVE_MODULOS]));
     for (const [k, v] of Object.entries(modulosAsignados)) {
       if (!remoto[k]) {
-        try { await redis(['HSET', CLAVE_MODULOS, k, v]); remoto[k] = v; } catch (e) { /* se reintenta en el próximo arranque */ }
+        try { await redis(['HSET', CLAVE_MODULOS, k, v]); remoto[k] = v; } catch (e) { }
       }
     }
     modulosAsignados = remoto;
@@ -162,11 +152,10 @@ async function persistirModulo(clave, valor) {
   }
   if (valor) modulosAsignados[clave] = valor;
   else delete modulosAsignados[clave];
-  try { fs.writeFileSync(ARCHIVO_MODULOS, JSON.stringify(modulosAsignados, null, 2)); } catch (e) { /* hosting de solo lectura */ }
+  try { fs.writeFileSync(ARCHIVO_MODULOS, JSON.stringify(modulosAsignados, null, 2)); } catch (e) { }
 }
 
-// ---------- Comercial asignado manualmente a una factura (manda sobre el comercial del cliente) ----------
-// Guarda { "empresaId:facturaId": "NOMBRE DEL COMERCIAL" }; sirve cuando un cliente tiene más de un asesor
+// ---------- Comercial asignado manualmente a una factura ----------
 const ARCHIVO_COM_FACT = path.join(process.env.DATA_DIR || __dirname, 'comerciales-factura.json');
 const CLAVE_COM_FACT = 'autentic:comerciales-factura';
 let comercialesFactura = {};
@@ -178,7 +167,7 @@ async function cargarComercialesFactura() {
     const remoto = hashAObjeto(await redis(['HGETALL', CLAVE_COM_FACT]));
     for (const [k, v] of Object.entries(comercialesFactura)) {
       if (!remoto[k]) {
-        try { await redis(['HSET', CLAVE_COM_FACT, k, v]); remoto[k] = v; } catch (e) { /* se reintenta en el próximo arranque */ }
+        try { await redis(['HSET', CLAVE_COM_FACT, k, v]); remoto[k] = v; } catch (e) { }
       }
     }
     comercialesFactura = remoto;
@@ -194,11 +183,10 @@ async function persistirComercialFactura(clave, valor) {
   }
   if (valor) comercialesFactura[clave] = valor;
   else delete comercialesFactura[clave];
-  try { fs.writeFileSync(ARCHIVO_COM_FACT, JSON.stringify(comercialesFactura, null, 2)); } catch (e) { /* hosting de solo lectura */ }
+  try { fs.writeFileSync(ARCHIVO_COM_FACT, JSON.stringify(comercialesFactura, null, 2)); } catch (e) { }
 }
 
-// ---------- Condición (PAGADO / PENDIENTE) cambiada manualmente en una factura ----------
-// Guarda { "empresaId:facturaId": "PAGADO" | "PENDIENTE" } y manda sobre la condición calculada por el saldo
+// ---------- Condición cambiada manualmente en una factura ----------
 const ARCHIVO_CONDICIONES = path.join(process.env.DATA_DIR || __dirname, 'condiciones.json');
 const CLAVE_CONDICIONES = 'autentic:condiciones';
 let condicionesManuales = {};
@@ -210,7 +198,7 @@ async function cargarCondiciones() {
     const remoto = hashAObjeto(await redis(['HGETALL', CLAVE_CONDICIONES]));
     for (const [k, v] of Object.entries(condicionesManuales)) {
       if (!remoto[k]) {
-        try { await redis(['HSET', CLAVE_CONDICIONES, k, v]); remoto[k] = v; } catch (e) { /* se reintenta en el próximo arranque */ }
+        try { await redis(['HSET', CLAVE_CONDICIONES, k, v]); remoto[k] = v; } catch (e) { }
       }
     }
     condicionesManuales = remoto;
@@ -226,7 +214,7 @@ async function persistirCondicion(clave, valor) {
   }
   if (valor) condicionesManuales[clave] = valor;
   else delete condicionesManuales[clave];
-  try { fs.writeFileSync(ARCHIVO_CONDICIONES, JSON.stringify(condicionesManuales, null, 2)); } catch (e) { /* hosting de solo lectura */ }
+  try { fs.writeFileSync(ARCHIVO_CONDICIONES, JSON.stringify(condicionesManuales, null, 2)); } catch (e) { }
 }
 
 const asignacionesListas = Promise.all([cargarAsignaciones(), cargarMeses(), cargarModulos(), cargarComercialesFactura(), cargarCondiciones()]);
@@ -238,8 +226,6 @@ function hashAObjeto(r) {
   return o;
 }
 
-// En hostings tipo Vercel pueden existir varias copias del servidor, cada una con su propia memoria.
-// Para que todas vean lo mismo, antes de usar las asignaciones se vuelven a leer de Upstash (máximo cada 3 segundos).
 let ultimoSync = Date.now();
 async function sincronizarRemoto(forzar) {
   if (!ALMACEN_REMOTO) return;
@@ -258,7 +244,6 @@ async function sincronizarRemoto(forzar) {
 }
 
 async function persistirAsignacion(nit, comercial) {
-  // Primero se guarda en Upstash: si falla, no se cambia nada en memoria y el usuario ve el error
   if (ALMACEN_REMOTO) {
     await redis(comercial ? ['HSET', CLAVE_ASIGNACIONES, nit, comercial] : ['HDEL', CLAVE_ASIGNACIONES, nit]);
   }
@@ -283,7 +268,7 @@ let contratosBD = [
   { id: 2, cliente: 'VISION Y MARKETING SAS', valor: 8500000, fechaInicio: '2026-03-01', fechaFin: '2026-09-30', estado: 'FINALIZADO', responsable: 'CARLOS RUIZ' }
 ];
 
-// ---------- Autenticación (token cacheado, Siigo lo mantiene vigente ~24h) ----------
+// ---------- Autenticación ----------
 const tokens = new Map();
 
 async function getToken(empresa) {
@@ -298,8 +283,6 @@ async function getToken(empresa) {
   return res.data.access_token;
 }
 
-// Siigo limita las llamadas por minuto: se espacian por cuenta y, si responde 429,
-// se espera el tiempo que Siigo indica ("Try again in N seconds") antes de reintentar.
 const siguienteTurno = new Map();
 async function esperarTurno(clave) {
   const turno = Math.max(Date.now(), siguienteTurno.get(clave) || 0);
@@ -356,13 +339,11 @@ async function traerFacturas(token, desde, hasta) {
     if (results.length === 0) break;
     page++;
   }
-  todas.esperadas = Number.isFinite(total) ? total : todas.length; // total que reporta Siigo, para detectar cargas incompletas
+  todas.esperadas = Number.isFinite(total) ? total : todas.length;
   return todas;
 }
 
 // ---------- Nombre del cliente ----------
-// El listado de facturas de Siigo solo trae id + identificación (NIT) del cliente,
-// así que se consulta /v1/customers/{id} y se guarda en caché.
 const clientesCache = new Map();
 
 function nombreDeCliente(c) {
@@ -381,11 +362,9 @@ function nombreDeCliente(c) {
   return '';
 }
 
-// Lista completa de clientes por empresa (pocas llamadas, de 100 en 100), cacheada 30 min.
-// Sirve tanto para los nombres en facturas como para la pestaña Terceros.
-const clientesRaw = new Map();      // emp.id -> { ts, lista }
-const clientesEnCurso = new Map();  // emp.id -> Promise (evita cargas duplicadas)
-const facturasCache = new Map();    // "empresa|desde|hasta" -> { ts, data }
+const clientesRaw = new Map();
+const clientesEnCurso = new Map();
+const facturasCache = new Map();
 
 async function obtenerClientesRaw(emp, token, forzar = false) {
   const c = clientesRaw.get(emp.id);
@@ -414,7 +393,6 @@ async function obtenerClientesRaw(emp, token, forzar = false) {
   try { return await p; } finally { clientesEnCurso.delete(emp.id); }
 }
 
-// Devuelve un texto de aviso si no se pudieron cargar los nombres (no rompe las facturas)
 async function resolverClientes(emp, token, facturas) {
   const faltan = facturas.some(f => f.customer && f.customer.id && !clientesCache.has(`${emp.id}:${f.customer.id}`));
   if (!faltan) return '';
@@ -428,8 +406,6 @@ async function resolverClientes(emp, token, facturas) {
   }
 }
 
-// Toma de las observaciones el periodo de consumo.
-// Ej: "Consumo mes de abril y mayo 2026. Contrato 12" -> "ABRIL Y MAYO 2026"
 function extraerConsumo(obs) {
   if (!obs) return '-';
   const texto = String(obs).replace(/\s+/g, ' ').trim();
@@ -454,17 +430,13 @@ function rangoFechas(ano, mes) {
   return { desde: `${ano}-01-01`, hasta: `${ano}-12-31` };
 }
 
-// El mes asignado manualmente manda sobre la fecha de la factura:
-//  - se quitan del periodo las facturas que el usuario movió a otro mes
-//  - se agregan las que el usuario movió a este periodo aunque estén facturadas en otro mes
-// Suma (o resta) días a una fecha "YYYY-MM-DD"
 function sumarDias(fechaISO, n) {
   const d = new Date(fechaISO + 'T00:00:00Z');
   d.setUTCDate(d.getUTCDate() + n);
   return d.toISOString().slice(0, 10);
 }
 
-const facturaPorIdCache = new Map(); // "empresa:facturaId" -> { ts, data }
+const facturaPorIdCache = new Map();
 const MAX_FACTURAS_MOVIDAS = 40;
 
 async function ajustarPorMesAsignado(emp, token, facturas, desde, hasta, refrescar) {
@@ -507,9 +479,7 @@ async function ajustarPorMesAsignado(emp, token, facturas, desde, hasta, refresc
 }
 
 // ---------- Notas crédito ----------
-// La factura de Siigo no indica si tiene nota crédito: se leen las notas crédito (GET /v1/credit-notes),
-// que traen invoice.id e invoice.name de la factura a la que se aplicaron, y se cruzan con las facturas.
-const notasCreditoCache = new Map(); // "empresa|desde" -> { ts, mapa }
+const notasCreditoCache = new Map();
 
 async function traerNotasCredito(token, desde, hasta) {
   const todas = [];
@@ -526,7 +496,6 @@ async function traerNotasCredito(token, desde, hasta) {
   return todas;
 }
 
-// Notas crédito emitidas desde 2 meses antes del periodo hasta hoy (una nota puede emitirse meses después de la factura)
 async function notasCreditoPorFactura(emp, token, desde, refrescar) {
   const ini = sumarDias(desde, -62);
   const fin = sumarDias(new Date().toISOString().slice(0, 10), 1);
@@ -554,7 +523,6 @@ async function notasCreditoPorFactura(emp, token, desde, refrescar) {
   return mapa;
 }
 
-// Resumen para el diagnóstico: permite comprobar con datos reales cómo referencia Siigo la factura
 async function resumenNotasCredito(token, desde) {
   try {
     const lista = await traerNotasCredito(token, sumarDias(desde, -62), sumarDias(new Date().toISOString().slice(0, 10), 1));
@@ -577,8 +545,6 @@ async function facturasDeEmpresa(emp, desde, hasta, refrescar) {
   if (!refrescar && previo && Date.now() - previo.ts < 2 * 60 * 1000) {
     facturas = previo.data;
   } else {
-    // Se pide un día antes y un día después: el filtro de fechas de Siigo puede dejar por fuera el último día
-    // (o el primero). Luego ajustarPorMesAsignado descarta lo que no pertenece al periodo pedido.
     facturas = await traerFacturas(token, sumarDias(desde, -1), sumarDias(hasta, 1));
     facturasCache.set(claveCache, { ts: Date.now(), data: facturas });
   }
@@ -598,25 +564,19 @@ async function facturasDeEmpresa(emp, desde, hasta, refrescar) {
 
   const lista = facturas.map(f => {
     const c = f.customer || {};
-    // Se lee año/mes directo del texto "YYYY-MM-DD" para evitar el desfase de zona horaria
     const [y, m] = String(f.date).split('-');
     const numMes = Number(m) - 1;
-    // Si el usuario cambió el mes de esta factura, se usa ese mes (formato "YYYY-MM")
     const ov = mesesAsignados[`${emp.id}:${f.id}`];
     const ovValido = typeof ov === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(ov);
     const anoEf = ovValido ? ov.slice(0, 4) : y;
     const mesIdx = ovValido ? Number(ov.slice(5, 7)) - 1 : numMes;
     const nc = ncMapa ? (ncMapa.porId.get(String(f.id)) || ncMapa.porNombre.get(String(f.name))) : null;
-    // Facturas que Siigo entrega sin forma de pago (es el caso del cruce de vencimiento): se tratan como ventas Wompi
     const sinFormaPago = !(f.payments || []).some(p => p && (p.name || p.id));
     const autoWompi = sinFormaPago || (f.payments || []).some(esPagoWompi);
-    // Si el usuario eligió el módulo de esta factura, esa elección manda sobre la clasificación automática
     const mo = modulosAsignados[`${emp.id}:${f.id}`];
     const moValido = mo === 'WOMPI' || mo === 'FACTURACION';
     const nit = c.identification || '';
     const nombre = clientesCache.get(`${emp.id}:${c.id}`) || nombreDeCliente(c) || (nit ? `CLIENTE (${nit})` : 'N/A');
-    // Facturas en moneda extranjera (p. ej. USD): Siigo entrega los valores en esa moneda y la tasa de cambio en currency.exchange_rate.
-    // Todo se convierte a pesos con esa tasa; las facturas en COP quedan igual.
     const moneda = String((f.currency && f.currency.code) || 'COP').toUpperCase();
     const tasaApi = Number(f.currency && f.currency.exchange_rate);
     const tasa = moneda !== 'COP' && tasaApi > 0 ? tasaApi : 1;
@@ -624,7 +584,6 @@ async function facturasDeEmpresa(emp, desde, hasta, refrescar) {
     const saldoOriginal = Number(f.balance) || 0;
     const saldo = aPesos(saldoOriginal);
     const seller = f.seller;
-    // Siigo a veces entrega solo el número del vendedor (339, 606...): eso no es un nombre, así que se ignora
     let nombreVendedor = '';
     if (seller && typeof seller === 'object') nombreVendedor = String(seller.name || `${seller.first_name || ''} ${seller.last_name || ''}`.trim() || '').trim();
     else if (seller) nombreVendedor = String(seller).trim();
@@ -678,9 +637,6 @@ async function facturasDeEmpresa(emp, desde, hasta, refrescar) {
   return lista;
 }
 
-// GET /api/facturas?ano=2026&mes=10   (mes opcional: 1-12; sin mes trae todo el año)
-// GET /api/facturas?ano=2026&mes=10             -> todas las ventas del periodo
-// GET /api/facturas?...&refrescar=1&solo=wompi  -> vuelve a leer Siigo (sin caché) y devuelve solo las ventas Wompi
 app.get('/api/facturas', async (req, res) => {
   await asignacionesListas;
   await sincronizarRemoto();
@@ -692,7 +648,6 @@ app.get('/api/facturas', async (req, res) => {
 
   const conCredenciales = empresas.filter(e => e.user && e.key);
 
-  // Solo se usan datos demo si no hay credenciales configuradas
   if (conCredenciales.length === 0) {
     return res.json({ resumen: [], facturas: [
       { cliente: 'YOBANY ALBERTO LOPEZ QUINTERO', nit: '', mes: 'ENERO', numMes: 0, ano: '2026', numero: '14201', fecha: '2026-01-15', vencimiento: '-', condicion: 'PAGADO', fechaPago: '2026-01-20', responsable: 'JUAN PEREZ', valor: 10921780, total: 10921780, saldo: 0, empresa: 'Empresa 1' },
@@ -714,7 +669,6 @@ app.get('/api/facturas', async (req, res) => {
     }
   }));
 
-  // Orden: consecutivo de factura de mayor a menor
   const facturas = resultados.flatMap(r => r.facturas)
     .filter(f => !soloWompi || f.esWompi)
     .sort((a, b) => (b.consecutivo - a.consecutivo) || String(b.fecha).localeCompare(String(a.fecha)));
@@ -734,7 +688,6 @@ app.get('/api/facturas', async (req, res) => {
   });
 });
 
-// ---------- Terceros (clientes) de ambas empresas + comercial asignado ----------
 let tercerosCache = { ts: 0, base: [], resumen: [] };
 
 function mapearTercero(emp, c) {
@@ -765,8 +718,6 @@ function aplicarAsignaciones(base) {
   return base.map(t => ({ ...t, comercial: asignaciones[t.nit] || '' }));
 }
 
-// GET /api/terceros            (usa caché de 10 min)
-// GET /api/terceros?refrescar=1 (vuelve a leer Siigo)
 app.get('/api/terceros', async (req, res) => {
   await asignacionesListas;
   await sincronizarRemoto();
@@ -789,7 +740,6 @@ app.get('/api/terceros', async (req, res) => {
     }
   }));
 
-  // Un mismo NIT puede existir en las dos empresas: se une en una sola fila
   const mapa = new Map();
   resultados.forEach(r => r.terceros.forEach(t => {
     if (!t.nit) return;
@@ -806,14 +756,12 @@ app.get('/api/terceros', async (req, res) => {
   const base = [...mapa.values()].sort((a, b) => a.nombre.localeCompare(b.nombre));
   const resumen = resultados.map(r => ({ empresa: r.empresa, cantidad: r.terceros.length, error: r.error }));
 
-  // Solo se cachea si ambas empresas respondieron bien
   tercerosCache = { ts: resumen.some(r => r.error) ? 0 : Date.now(), base, resumen };
   res.json({ terceros: aplicarAsignaciones(base), resumen, almacenamiento });
 });
 
 app.get('/api/comerciales', (req, res) => res.json(COMERCIALES));
 
-// GET /api/estado -> diagnóstico del almacenamiento de asignaciones (no muestra claves ni datos)
 app.get('/api/estado', async (req, res) => {
   await asignacionesListas;
   await sincronizarRemoto(true);
@@ -844,7 +792,6 @@ app.get('/api/estado', async (req, res) => {
   res.type('json').send(JSON.stringify(info, null, 2));
 });
 
-// PUT /api/terceros/:nit/comercial   body: { comercial: "NOMBRE" }  (vacío = quitar asignación)
 app.put('/api/terceros/:nit/comercial', async (req, res) => {
   await asignacionesListas;
   await sincronizarRemoto();
@@ -863,8 +810,6 @@ app.put('/api/terceros/:nit/comercial', async (req, res) => {
   }
 });
 
-// GET /api/diagnostico-facturas?ano=2026&mes=9 -> qué entrega Siigo exactamente para ese periodo (sin caché).
-// Sirve para ver cuántas facturas hay por día, el consecutivo mínimo y máximo, y por forma de pago.
 app.get('/api/diagnostico-facturas', async (req, res) => {
   const ano = parseInt(req.query.ano, 10) || new Date().getFullYear();
   const mes = parseInt(req.query.mes, 10) || null;
@@ -905,7 +850,6 @@ app.get('/api/diagnostico-facturas', async (req, res) => {
   res.type('json').send(JSON.stringify(salida, null, 2));
 });
 
-// Muestra las formas de pago de venta de cada empresa en Siigo y cuáles se están tomando como Wompi
 app.get('/api/formas-pago', async (req, res) => {
   const salida = [];
   await Promise.all(empresas.map(async (emp) => {
@@ -922,8 +866,6 @@ app.get('/api/formas-pago', async (req, res) => {
   res.type('json').send(JSON.stringify(salida, null, 2));
 });
 
-// GET /api/buscar-factura?numero=10058,10057,9576[&prefijo=FV-2]
-// Busca esas facturas directamente en Siigo (ambas empresas) y explica por qué aparecen o no en el portal.
 app.get('/api/buscar-factura', async (req, res) => {
   await asignacionesListas;
   await sincronizarRemoto();
@@ -970,7 +912,6 @@ app.get('/api/buscar-factura', async (req, res) => {
   res.type('json').send(JSON.stringify(salida, null, 2));
 });
 
-// PUT /api/facturas/:empresaId/:facturaId/condicion   body: { condicion: "PAGADO" | "PENDIENTE" }   (vacío = vuelve a la condición según el saldo)
 app.put('/api/facturas/:empresaId/:facturaId/condicion', async (req, res) => {
   await asignacionesListas;
   await sincronizarRemoto();
@@ -988,7 +929,6 @@ app.put('/api/facturas/:empresaId/:facturaId/condicion', async (req, res) => {
   }
 });
 
-// PUT /api/facturas/:empresaId/:facturaId/modulo   body: { modulo: "WOMPI" | "FACTURACION" }   (vacío = clasificación automática)
 app.put('/api/facturas/:empresaId/:facturaId/modulo', async (req, res) => {
   await asignacionesListas;
   await sincronizarRemoto();
@@ -1006,7 +946,6 @@ app.put('/api/facturas/:empresaId/:facturaId/modulo', async (req, res) => {
   }
 });
 
-// PUT /api/facturas/:empresaId/:facturaId/comercial   body: { comercial: "NOMBRE" }   (vacío = vuelve al comercial del cliente)
 app.put('/api/facturas/:empresaId/:facturaId/comercial', async (req, res) => {
   await asignacionesListas;
   await sincronizarRemoto();
@@ -1024,7 +963,6 @@ app.put('/api/facturas/:empresaId/:facturaId/comercial', async (req, res) => {
   }
 });
 
-// PUT /api/facturas/:empresaId/:facturaId/mes   body: { mes: "2026-09" }   (vacío = volver al mes de la factura)
 app.put('/api/facturas/:empresaId/:facturaId/mes', async (req, res) => {
   await asignacionesListas;
   await sincronizarRemoto();
@@ -1039,6 +977,188 @@ app.put('/api/facturas/:empresaId/:facturaId/mes', async (req, res) => {
   } catch (e) {
     console.error('No se pudo guardar el mes de la factura:', e.message);
     res.status(500).json({ success: false, error: 'No se pudo guardar el mes' });
+  }
+});
+
+// ---------- Facturas ocultas de Cartera (el usuario las quita y el sistema lo recuerda) ----------
+// Guarda { "empresaId:facturaId": "fecha en que se ocultó" } en Upstash (y en cartera-ocultas.json como respaldo)
+const ARCHIVO_OCULTAS = path.join(process.env.DATA_DIR || __dirname, 'cartera-ocultas.json');
+const CLAVE_OCULTAS = 'autentic:cartera-ocultas';
+let ocultasCartera = {};
+try { ocultasCartera = JSON.parse(fs.readFileSync(ARCHIVO_OCULTAS, 'utf8')); } catch (e) { ocultasCartera = {}; }
+
+async function cargarOcultas() {
+  if (!ALMACEN_REMOTO) return;
+  try {
+    const remoto = hashAObjeto(await redis(['HGETALL', CLAVE_OCULTAS]));
+    for (const [k, v] of Object.entries(ocultasCartera)) {
+      if (!remoto[k]) {
+        try { await redis(['HSET', CLAVE_OCULTAS, k, v]); remoto[k] = v; } catch (e) { }
+      }
+    }
+    ocultasCartera = remoto;
+    console.log(`Facturas ocultas de cartera cargadas desde Upstash: ${Object.keys(remoto).length}`);
+  } catch (e) {
+    console.error('No se pudieron leer las facturas ocultas de Upstash:', e.message);
+  }
+}
+const ocultasListas = cargarOcultas();
+
+async function sincronizarOcultas() {
+  if (!ALMACEN_REMOTO) return;
+  try { ocultasCartera = hashAObjeto(await redis(['HGETALL', CLAVE_OCULTAS])); }
+  catch (e) { console.error('No se pudo sincronizar las facturas ocultas (se usa lo que hay en memoria):', e.message); }
+}
+
+async function persistirOculta(clave, ocultar) {
+  if (ALMACEN_REMOTO) {
+    await redis(ocultar ? ['HSET', CLAVE_OCULTAS, clave, new Date().toISOString()] : ['HDEL', CLAVE_OCULTAS, clave]);
+  }
+  if (ocultar) ocultasCartera[clave] = new Date().toISOString();
+  else delete ocultasCartera[clave];
+  try { fs.writeFileSync(ARCHIVO_OCULTAS, JSON.stringify(ocultasCartera, null, 2)); } catch (e) { }
+}
+
+// ---------- Cartera: TODAS las facturas con saldo pendiente de ambas empresas ----------
+const CARTERA_DESDE = /^\d{4}-\d{2}-\d{2}$/.test(process.env.CARTERA_DESDE || '') ? process.env.CARTERA_DESDE : '2022-01-01';
+let carteraCache = { ts: 0, data: null };
+let carteraEnCurso = null;
+
+async function carteraDeEmpresa(emp) {
+  const token = await getToken(emp);
+  if (!token) return { lista: [], nota: '' };
+
+  const hoy = new Date().toISOString().slice(0, 10);
+  const anoIni = Number(CARTERA_DESDE.slice(0, 4));
+  const anoFin = new Date().getFullYear();
+
+  const porId = new Map();
+  for (let y = anoIni; y <= anoFin; y++) {
+    const desde = y === anoIni ? CARTERA_DESDE : `${y}-01-01`;
+    const hasta = y === anoFin ? hoy : `${y}-12-31`;
+    const parte = await traerFacturas(token, sumarDias(desde, -1), sumarDias(hasta, 1));
+    parte.forEach(f => porId.set(String(f.id), f));
+  }
+  const facturas = [...porId.values()].filter(f => !f.annulled);
+
+  const aPesos = (f, n) => {
+    const moneda = String((f.currency && f.currency.code) || 'COP').toUpperCase();
+    const tasaApi = Number(f.currency && f.currency.exchange_rate);
+    const tasa = moneda !== 'COP' && tasaApi > 0 ? tasaApi : 1;
+    return Math.round((Number(n) || 0) * tasa * 100) / 100;
+  };
+
+  const pendientes = facturas.filter(f => {
+    const manual = condicionesManuales[`${emp.id}:${f.id}`];
+    if (manual === 'PAGADO') return false;
+    if (manual === 'PENDIENTE') return true;
+    return aPesos(f, f.balance) > 0;
+  });
+
+  const notas = [];
+  const avisoClientes = await resolverClientes(emp, token, pendientes);
+  if (avisoClientes) notas.push(avisoClientes);
+
+  let ncMapa = null;
+  try {
+    ncMapa = await notasCreditoPorFactura(emp, token, CARTERA_DESDE, false);
+  } catch (e) {
+    notas.push(`No se pudieron cargar las notas crédito (${describirError(e)}).`);
+  }
+
+  const lista = pendientes.map(f => {
+    const c = f.customer || {};
+    const nit = c.identification || '';
+    const nombre = clientesCache.get(`${emp.id}:${c.id}`) || nombreDeCliente(c) || (nit ? `CLIENTE (${nit})` : 'N/A');
+    const saldoSiigo = aPesos(f, f.balance);
+    const total = aPesos(f, f.total);
+    const nc = ncMapa ? (ncMapa.porId.get(String(f.id)) || ncMapa.porNombre.get(String(f.name))) : null;
+    const comFactura = comercialesFactura[`${emp.id}:${f.id}`] || '';
+    const nombreVend = f.seller && typeof f.seller === 'object' ? String(f.seller.name || '').trim() : '';
+    return {
+      id: f.id,
+      empresaId: emp.id,
+      empresa: emp.nombre,
+      cliente: nombre.toUpperCase(),
+      nit,
+      numero: f.name || f.id,
+      fecha: f.date,
+      vencimiento: (f.payments && f.payments[0] && f.payments[0].due_date) || '-',
+      total,
+      saldo: saldoSiigo > 0 ? saldoSiigo : total,
+      condicion: 'PENDIENTE',
+      moneda: String((f.currency && f.currency.code) || 'COP').toUpperCase(),
+      responsable: comFactura === 'SIN COMERCIAL' ? 'N/A' : (comFactura || asignaciones[String(nit).trim()] || (/^\d+$/.test(nombreVend) ? '' : nombreVend) || 'N/A'),
+      tieneNotaCredito: !!nc,
+      notasCredito: nc ? nc.nombres.join(', ') : ''
+    };
+  });
+
+  return { lista, nota: notas.join(' '), revisadas: facturas.length };
+}
+
+async function construirCartera() {
+  const resultados = await Promise.all(empresas.map(async (emp) => {
+    if (!emp.user || !emp.key) {
+      return { empresa: emp.nombre, lista: [], error: `Faltan credenciales (EMPRESA${emp.id}_USER / EMPRESA${emp.id}_KEY) en el .env` };
+    }
+    try {
+      const r = await carteraDeEmpresa(emp);
+      return { empresa: emp.nombre, lista: r.lista, nota: r.nota, revisadas: r.revisadas, error: null };
+    } catch (e) {
+      const error = describirError(e);
+      console.error(`[${emp.nombre}] Error armando la cartera:`, error);
+      return { empresa: emp.nombre, lista: [], error };
+    }
+  }));
+  return {
+    cartera: resultados.flatMap(r => r.lista),
+    resumen: resultados.map(r => ({ empresa: r.empresa, cantidad: r.lista.length, revisadas: r.revisadas || 0, error: r.error, nota: r.nota || '' })),
+    desde: CARTERA_DESDE
+  };
+}
+
+// GET /api/cartera -> usa caché de 10 min
+app.get('/api/cartera', async (req, res) => {
+  try {
+    await asignacionesListas;
+    await ocultasListas;
+    await sincronizarRemoto();
+    await sincronizarOcultas();
+
+    let data;
+    const vigente = carteraCache.data && Date.now() - carteraCache.ts < 10 * 60 * 1000;
+    if (!req.query.refrescar && vigente) {
+      data = carteraCache.data;
+    } else {
+      if (!carteraEnCurso) carteraEnCurso = construirCartera().finally(() => { carteraEnCurso = null; });
+      data = await carteraEnCurso;
+      if (!data.resumen.some(r => r.error)) carteraCache = { ts: Date.now(), data };
+    }
+
+    res.json({
+      ...data,
+      cartera: data.cartera.map(f => ({ ...f, oculta: !!ocultasCartera[`${f.empresaId}:${f.id}`] }))
+    });
+  } catch (e) {
+    console.error('Error en /api/cartera:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// PUT /api/cartera/:empresaId/:facturaId/ocultar
+app.put('/api/cartera/:empresaId/:facturaId/ocultar', async (req, res) => {
+  await ocultasListas;
+  const emp = empresas.find(e => String(e.id) === String(req.params.empresaId));
+  const facturaId = String(req.params.facturaId || '').trim();
+  if (!emp || !facturaId) return res.status(400).json({ success: false, error: 'Empresa o factura no válida' });
+  const ocultar = !!(req.body && req.body.oculta);
+  try {
+    await persistirOculta(`${emp.id}:${facturaId}`, ocultar);
+    res.json({ success: true });
+  } catch (e) {
+    console.error('No se pudo guardar la factura oculta:', e.message);
+    res.status(500).json({ success: false, error: 'No se pudo guardar el cambio' });
   }
 });
 
@@ -1092,7 +1212,7 @@ app.get('/', (req, res) => {
         .form-container { background: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
         .form-container input, .form-container select { padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; }
         .btn-submit { background: #002d5b; color: white; border: none; padding: 10px; border-radius: 6px; font-weight: bold; cursor: pointer; grid-column: 1 / -1; }
-              .aviso { background: #ecfdf5; color: #065f46; padding: 7px 12px; border-radius: 8px; margin-bottom: 10px; font-size: 11px; }
+        .aviso { background: #ecfdf5; color: #065f46; padding: 7px 12px; border-radius: 8px; margin-bottom: 10px; font-size: 11px; }
         .aviso:empty { display: none; }
         .chk { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #334155; white-space: nowrap; cursor: pointer; }
         .sel-mes { padding: 3px 5px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 11px; background: #fff; color: #334155; }
@@ -1119,7 +1239,6 @@ app.get('/', (req, res) => {
         .sel-cond.cambiado { border-color: #d97706; }
         .inp-comercial.cambiado { border-color: #d97706; background: #fffbeb; font-weight: 600; }
 
-        /* ---------- Estructura global: menú lateral + páginas ---------- */
         .app { display: flex; gap: 20px; align-items: flex-start; }
         .sidebar { width: 190px; flex: 0 0 190px; background: #002d5b; color: #fff; border-radius: 8px; padding: 18px 0; position: sticky; top: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.08); }
         .sidebar .brand { padding: 2px 16px 12px; font-size: 18px; font-weight: 700; border-bottom: 1px solid rgba(255,255,255,0.12); margin-bottom: 8px; }
@@ -1153,7 +1272,6 @@ app.get('/', (req, res) => {
     </head>
     <body>
       <div class="app">
-        <!-- Menú lateral: Inicio, y debajo los módulos (Comercial primero, Cartera después) -->
         <aside class="sidebar">
           <div class="brand"><span class="ico">📐</span><span class="txt"> AutenTIC</span></div>
           <button class="nav-toggle" id="btnMenu" onclick="alternarMenu()" title="Contraer menú">« Contraer menú</button>
@@ -1166,7 +1284,6 @@ app.get('/', (req, res) => {
         </aside>
 
         <div class="contenido">
-          <!-- Página de inicio (punto de aterrizaje) -->
           <section id="pgInicio">
             <div class="bienvenida">
               <h1>Bienvenido a AutenTIC</h1>
@@ -1184,7 +1301,6 @@ app.get('/', (req, res) => {
             </div>
           </section>
 
-          <!-- Módulo de Cartera (cartera.js inyecta aquí su contenido) -->
           <section id="pgCartera" style="display:none;">
             <div class="bienvenida">
               <h1>Módulo de Cartera</h1>
@@ -1192,210 +1308,203 @@ app.get('/', (req, res) => {
             <div class="vacio">Este módulo todavía no tiene áreas de trabajo configuradas.</div>
           </section>
 
-          <!-- Módulo Comercial: 5 áreas en pestañas -->
           <section id="pgComercial" style="display:none;">
-      <div class="header">
-        <div class="logo">💼 Módulo Comercial</div>
-        <div class="kpi-box">
-          <div class="kpi-title" id="kpiLabel">Valor Total Facturado (Bruto)</div>
-          <div class="kpi-value" id="totalKPI">$ 0,00</div>
-        </div>
-      </div>
+            <div class="header">
+              <div class="logo">💼 Módulo Comercial</div>
+              <div class="kpi-box">
+                <div class="kpi-title" id="kpiLabel">Valor Total Facturado (Bruto)</div>
+                <div class="kpi-value" id="totalKPI">$ 0,00</div>
+              </div>
+            </div>
 
-      <div class="filters-container" id="barraFiltros">
-        <div class="multi" id="boxAnos">
-          <button type="button" class="multi-btn" id="btnAnos" onclick="alternarPanelAnos()">AÑO</button>
-          <div class="multi-panel" id="panelAnos" style="display:none;"></div>
-        </div>
-        <select id="selMes" class="server"></select>
-        <select id="filterCondicion"><option value="">CONDICIÓN (Todas)</option></select>
-        <input type="text" id="filterCliente" class="buscar" placeholder="Buscar por cliente, NIT o No. factura..." onkeydown="if (event.key === 'Enter') buscarFacturacion()" />
-        <select id="filterResponsable"><option value="">RESPONSABLE / COMERCIAL (Todos)</option></select>
-        <select id="filterEmpresa"><option value="">EMPRESA (Todas)</option></select>
-        <label class="chk"><input type="checkbox" id="chkNC" /> Ver facturas con nota crédito <span id="cntNC"></span></label>
-        <button class="btn-small" id="btnBuscarFact" onclick="buscarFacturacion()">🔍 BUSCAR / ACTUALIZAR</button>
-      </div>
+            <div class="filters-container" id="barraFiltros">
+              <div class="multi" id="boxAnos">
+                <button type="button" class="multi-btn" id="btnAnos" onclick="alternarPanelAnos()">AÑO</button>
+                <div class="multi-panel" id="panelAnos" style="display:none;"></div>
+              </div>
+              <select id="selMes" class="server"></select>
+              <select id="filterCondicion"><option value="">CONDICIÓN (Todas)</option></select>
+              <input type="text" id="filterCliente" class="buscar" placeholder="Buscar por cliente, NIT o No. factura..." onkeydown="if (event.key === 'Enter') buscarFacturacion()" />
+              <select id="filterResponsable"><option value="">RESPONSABLE / COMERCIAL (Todos)</option></select>
+              <select id="filterEmpresa"><option value="">EMPRESA (Todas)</option></select>
+              <label class="chk"><input type="checkbox" id="chkNC" /> Ver facturas con nota crédito <span id="cntNC"></span></label>
+              <button class="btn-small" id="btnBuscarFact" onclick="buscarFacturacion()">🔍 BUSCAR / ACTUALIZAR</button>
+            </div>
 
-      <div id="avisoEmpresas" class="aviso"></div>
+            <div id="avisoEmpresas" class="aviso"></div>
 
-      <div class="tabs">
-        <button class="tab-btn active" id="btnFact" onclick="irA('comercial/facturacion')">FACTURACIÓN</button>
-        <button class="tab-btn" id="btnWompi" onclick="irA('comercial/ventas-wompi')">VENTAS WOMPI</button>
-        <button class="tab-btn" id="btnCons" onclick="irA('comercial/consolidado')">CONSOLIDADO</button>
-        <button class="tab-btn" id="btnCont" onclick="irA('comercial/contratos')">CONTRATOS</button>
-        <button class="tab-btn" id="btnTerc" onclick="irA('comercial/terceros')">TERCEROS</button>
-      </div>
+            <div class="tabs">
+              <button class="tab-btn active" id="btnFact" onclick="irA('comercial/facturacion')">FACTURACIÓN</button>
+              <button class="tab-btn" id="btnWompi" onclick="irA('comercial/ventas-wompi')">VENTAS WOMPI</button>
+              <button class="tab-btn" id="btnCons" onclick="irA('comercial/consolidado')">CONSOLIDADO</button>
+              <button class="tab-btn" id="btnCont" onclick="irA('comercial/contratos')">CONTRATOS</button>
+              <button class="tab-btn" id="btnTerc" onclick="irA('comercial/terceros')">TERCEROS</button>
+            </div>
 
-      <!-- Vista Facturación -->
-      <div id="viewFacturacion">
-        <div class="nota-vista">Ventas del periodo consultado, sin las de Wompi (esas están en VENTAS WOMPI). Elige los filtros y presiona BUSCAR / ACTUALIZAR.</div>
-        <div class="table-container">
-        <table>
-          <thead>
-            <tr>
-              <th>CLIENTE</th>
-              <th>COMERCIAL</th>
-              <th>NIT</th>
-              <th>MES</th>
-              <th>CONSUMO MES</th>
-              <th>No FRA</th>
-              <th>FECHA</th>
-              <th>VENCIMIENTO</th>
-              <th>CONDICIÓN</th>
-              <th>FECHA DE PAGO</th>
-              <th>VALOR BRUTO</th>
-              <th>TOTAL</th>
-              <th>SALDO</th>
-              <th>NOTA CRÉDITO</th>
-              <th>EMPRESA</th>
-              <th>FORMA DE PAGO</th>
-              <th>MÓDULO</th>
-            </tr>
-          </thead>
-          <tbody id="tablaFacturas"></tbody>
-        </table>
-        </div>
-      </div>
+            <div id="viewFacturacion">
+              <div class="nota-vista">Ventas del periodo consultado, sin las de Wompi (esas están en VENTAS WOMPI). Elige los filtros y presiona BUSCAR / ACTUALIZAR.</div>
+              <div class="table-container">
+              <table>
+                <thead>
+                  <tr>
+                    <th>CLIENTE</th>
+                    <th>COMERCIAL</th>
+                    <th>NIT</th>
+                    <th>MES</th>
+                    <th>CONSUMO MES</th>
+                    <th>No FRA</th>
+                    <th>FECHA</th>
+                    <th>VENCIMIENTO</th>
+                    <th>CONDICIÓN</th>
+                    <th>FECHA DE PAGO</th>
+                    <th>VALOR BRUTO</th>
+                    <th>TOTAL</th>
+                    <th>SALDO</th>
+                    <th>NOTA CRÉDITO</th>
+                    <th>EMPRESA</th>
+                    <th>FORMA DE PAGO</th>
+                    <th>MÓDULO</th>
+                  </tr>
+                </thead>
+                <tbody id="tablaFacturas"></tbody>
+              </table>
+              </div>
+            </div>
 
-      <!-- Vista Ventas Wompi -->
-      <div id="viewWompi" style="display:none;">
-        <div class="filters-container" id="barraWompi">
-          <select id="wAno" class="server"></select>
-          <select id="wMes" class="server"></select>
-          <select id="wDia" class="server"></select>
-          <select id="wEmpresa"><option value="">EMPRESA (Todas)</option>${OPCIONES_EMPRESA}</select>
-          <button class="btn-small" id="btnBuscarWompi" onclick="cargarWompi()">🔍 BUSCAR / ACTUALIZAR WOMPI</button>
-        </div>
-        <div class="nota-vista">
-          Ventas cuya forma de pago corresponde a Wompi (contrapartida 138095) o a Cruce de vencimiento (facturas sin forma de pago). Si falta alguna o sobra otra, revisa las
-          <a href="/api/formas-pago" target="_blank">formas de pago de Siigo</a>.
-        </div>
-        <div class="table-container">
-          <table>
-            <thead>
-              <tr>
-                <th>CLIENTE</th>
-                <th>NIT</th>
-                <th>MES</th>
-                <th>CONSUMO MES</th>
-                <th>No FRA</th>
-                <th>FECHA</th>
-                <th>VENCIMIENTO</th>
-                <th>CONDICIÓN</th>
-                <th>FECHA DE PAGO</th>
-                <th>VALOR BRUTO</th>
-                <th>TOTAL</th>
-                <th>SALDO</th>
-              <th>NOTA CRÉDITO</th>
-                <th>EMPRESA</th>
-                <th>FORMA DE PAGO</th>
-              <th>MÓDULO</th>
-              </tr>
-            </thead>
-            <tbody id="tablaWompi"></tbody>
-          </table>
-        </div>
-      </div>
+            <div id="viewWompi" style="display:none;">
+              <div class="filters-container" id="barraWompi">
+                <select id="wAno" class="server"></select>
+                <select id="wMes" class="server"></select>
+                <select id="wDia" class="server"></select>
+                <select id="wEmpresa"><option value="">EMPRESA (Todas)</option>${OPCIONES_EMPRESA}</select>
+                <button class="btn-small" id="btnBuscarWompi" onclick="cargarWompi()">🔍 BUSCAR / ACTUALIZAR WOMPI</button>
+              </div>
+              <div class="nota-vista">
+                Ventas cuya forma de pago corresponde a Wompi (contrapartida 138095) o a Cruce de vencimiento (facturas sin forma de pago). Si falta alguna o sobra otra, revisa las
+                <a href="/api/formas-pago" target="_blank">formas de pago de Siigo</a>.
+              </div>
+              <div class="table-container">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>CLIENTE</th>
+                      <th>NIT</th>
+                      <th>MES</th>
+                      <th>CONSUMO MES</th>
+                      <th>No FRA</th>
+                      <th>FECHA</th>
+                      <th>VENCIMIENTO</th>
+                      <th>CONDICIÓN</th>
+                      <th>FECHA DE PAGO</th>
+                      <th>VALOR BRUTO</th>
+                      <th>TOTAL</th>
+                      <th>SALDO</th>
+                      <th>NOTA CRÉDITO</th>
+                      <th>EMPRESA</th>
+                      <th>FORMA DE PAGO</th>
+                      <th>MÓDULO</th>
+                    </tr>
+                  </thead>
+                  <tbody id="tablaWompi"></tbody>
+                </table>
+              </div>
+            </div>
 
-      <!-- Vista Consolidado -->
-      <div id="viewConsolidado" style="display:none;">
-        <div class="nota-vista">Valor bruto facturado por cliente y por mes, con los mismos filtros de Facturación (sin las ventas Wompi). Para ver el consumo de un asesor, filtra por comercial.</div>
-        <div class="table-container">
-        <table>
-          <thead>
-            <tr>
-              <th>CLIENTE</th>
-              <th>ENERO</th>
-              <th>FEBRERO</th>
-              <th>MARZO</th>
-              <th>ABRIL</th>
-              <th>MAYO</th>
-              <th>JUNIO</th>
-              <th>JULIO</th>
-              <th>AGOSTO</th>
-              <th>SEPTIEMBRE</th>
-              <th>OCTUBRE</th>
-              <th>NOVIEMBRE</th>
-              <th>DICIEMBRE</th>
-              <th>TOTAL BRUTO</th>
-            </tr>
-          </thead>
-          <tbody id="tablaConsolidado"></tbody>
-        </table>
-        </div>
-      </div>
+            <div id="viewConsolidado" style="display:none;">
+              <div class="nota-vista">Valor bruto facturado por cliente y por mes, con los mismos filtros de Facturación (sin las ventas Wompi). Para ver el consumo de un asesor, filtra por comercial.</div>
+              <div class="table-container">
+              <table>
+                <thead>
+                  <tr>
+                    <th>CLIENTE</th>
+                    <th>ENERO</th>
+                    <th>FEBRERO</th>
+                    <th>MARZO</th>
+                    <th>ABRIL</th>
+                    <th>MAYO</th>
+                    <th>JUNIO</th>
+                    <th>JULIO</th>
+                    <th>AGOSTO</th>
+                    <th>SEPTIEMBRE</th>
+                    <th>OCTUBRE</th>
+                    <th>NOVIEMBRE</th>
+                    <th>DICIEMBRE</th>
+                    <th>TOTAL BRUTO</th>
+                  </tr>
+                </thead>
+                <tbody id="tablaConsolidado"></tbody>
+              </table>
+              </div>
+            </div>
 
-      <!-- Vista Terceros -->
-      <div id="viewTerceros" style="display:none;">
-        <div class="filters-container">
-          <input type="text" id="tBuscar" class="buscar" placeholder="Buscar por nombre o NIT..." oninput="filtrarTerceros()" />
-          <select id="tEmpresa" onchange="filtrarTerceros()"><option value="">EMPRESA (Todas)</option></select>
-          <select id="tAsignacion" onchange="filtrarTerceros()">
-            <option value="">COMERCIAL (Todos)</option>
-            <option value="SIN">SIN COMERCIAL</option>
-            <option value="CON">CON COMERCIAL</option>
-          </select>
-          <button class="btn-small" onclick="cargarTerceros(true)">↻ ACTUALIZAR DESDE SIIGO</button>
-        </div>
-        <div class="nota-vista">Clientes de ambas empresas en Siigo. El comercial encargado que asignes queda guardado.</div>
-        <div class="table-container">
-          <table>
-            <thead>
-              <tr>
-                <th>NOMBRE / RAZÓN SOCIAL</th>
-                <th>NIT</th>
-                <th>TIPO</th>
-                <th>CIUDAD</th>
-                <th>EMAIL</th>
-                <th>TELÉFONO</th>
-                <th>EMPRESA</th>
-                <th>COMERCIAL ENCARGADO</th>
-              </tr>
-            </thead>
-            <tbody id="tablaTerceros"></tbody>
-          </table>
-        </div>
-      </div>
+            <div id="viewTerceros" style="display:none;">
+              <div class="filters-container">
+                <input type="text" id="tBuscar" class="buscar" placeholder="Buscar por nombre o NIT..." oninput="filtrarTerceros()" />
+                <select id="tEmpresa" onchange="filtrarTerceros()"><option value="">EMPRESA (Todas)</option></select>
+                <select id="tAsignacion" onchange="filtrarTerceros()">
+                  <option value="">COMERCIAL (Todos)</option>
+                  <option value="SIN">SIN COMERCIAL</option>
+                  <option value="CON">CON COMERCIAL</option>
+                </select>
+                <button class="btn-small" onclick="cargarTerceros(true)">↻ ACTUALIZAR DESDE SIIGO</button>
+              </div>
+              <div class="nota-vista">Clientes de ambas empresas en Siigo. El comercial encargado que asignes queda guardado.</div>
+              <div class="table-container">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>NOMBRE / RAZÓN SOCIAL</th>
+                      <th>NIT</th>
+                      <th>TIPO</th>
+                      <th>CIUDAD</th>
+                      <th>EMAIL</th>
+                      <th>TELÉFONO</th>
+                      <th>EMPRESA</th>
+                      <th>COMERCIAL ENCARGADO</th>
+                    </tr>
+                  </thead>
+                  <tbody id="tablaTerceros"></tbody>
+                </table>
+              </div>
+            </div>
 
-      <!-- Vista Contratos -->
-      <div id="viewContratos" style="display:none;">
-        <form class="filters-container" onsubmit="guardarContrato(event)">
-          <input type="text" id="cCliente" placeholder="Nombre del Cliente" required />
-          <input type="number" id="cValor" placeholder="Valor Contrato" required />
-          <input type="date" id="cFechaInicio" required />
-          <input type="date" id="cFechaFin" required />
-          <select id="cEstado">
-            <option value="ACTIVO">ACTIVO</option>
-            <option value="PENDIENTE">PENDIENTE</option>
-            <option value="FINALIZADO">FINALIZADO</option>
-          </select>
-          <input type="text" id="cResponsable" placeholder="Responsable Comercial" required />
-          <button type="submit" class="btn-small">+ REGISTRAR CONTRATO</button>
-        </form>
-        <div class="nota-vista">Registro de contratos por cliente.</div>
+            <div id="viewContratos" style="display:none;">
+              <form class="filters-container" onsubmit="guardarContrato(event)">
+                <input type="text" id="cCliente" placeholder="Nombre del Cliente" required />
+                <input type="number" id="cValor" placeholder="Valor Contrato" required />
+                <input type="date" id="cFechaInicio" required />
+                <input type="date" id="cFechaFin" required />
+                <select id="cEstado">
+                  <option value="ACTIVO">ACTIVO</option>
+                  <option value="PENDIENTE">PENDIENTE</option>
+                  <option value="FINALIZADO">FINALIZADO</option>
+                </select>
+                <input type="text" id="cResponsable" placeholder="Responsable Comercial" required />
+                <button type="submit" class="btn-small">+ REGISTRAR CONTRATO</button>
+              </form>
+              <div class="nota-vista">Registro de contratos por cliente.</div>
 
-        <div class="table-container">
-          <table>
-            <thead>
-              <tr>
-                <th>CLIENTE</th>
-                <th>VALOR CONTRATO</th>
-                <th>FECHA INICIO</th>
-                <th>FECHA FIN</th>
-                <th>ESTADO</th>
-                <th>RESPONSABLE</th>
-              </tr>
-            </thead>
-            <tbody id="tablaContratos"></tbody>
-          </table>
-        </div>
-      </div>
-
+              <div class="table-container">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>CLIENTE</th>
+                      <th>VALOR CONTRATO</th>
+                      <th>FECHA INICIO</th>
+                      <th>FECHA FIN</th>
+                      <th>ESTADO</th>
+                      <th>RESPONSABLE</th>
+                    </tr>
+                  </thead>
+                  <tbody id="tablaContratos"></tbody>
+                </table>
+              </div>
+            </div>
           </section>
         </div>
       </div>
 
-      <!-- [LÍNEA 2 DE 3] Módulo de Cartera (se carga antes del script principal) -->
+      <!-- [LÍNEA 2 DE 3] Módulo de Cartera -->
       <script src="/cartera.js"></script>
       <script>
         let facturasGlobales = [];
@@ -1405,8 +1514,8 @@ app.get('/', (req, res) => {
         const COMERCIALES_FIJOS = ${COMERCIALES_JSON};
         let recargarFacturas = false;
         let wompiGlobales = [];
-        let periodoFact = null;   // { ano, mes } de la última búsqueda de Facturación
-        let periodoWompi = null;  // { ano, mes } de la última búsqueda de Wompi
+        let periodoFact = null;
+        let periodoWompi = null;
         const MSG_FACT = '<tr><td colspan="17" style="text-align:center;">Elige los filtros y presiona 🔍 BUSCAR / ACTUALIZAR.</td></tr>';
         const MSG_WOMPI = '<tr><td colspan="16" style="text-align:center;">Elige Año, Mes, Día y Empresa y presiona 🔍 BUSCAR / ACTUALIZAR WOMPI.</td></tr>';
 
@@ -1424,8 +1533,6 @@ app.get('/', (req, res) => {
           }).join(' &nbsp;|&nbsp; ');
         }
 
-        // Al volver a una pestaña no se consulta nada: se muestra lo ya cargado.
-        // Si cambió la asignación de comerciales, solo se avisa para que el operador actualice.
         function refrescarFacturasSiHaceFalta() {
           aplicarFiltros();
           if (recargarFacturas && (facturasGlobales.length || wompiGlobales.length)) {
@@ -1454,7 +1561,6 @@ app.get('/', (req, res) => {
           });
           selMes.value = String(hoy.getMonth() + 1);
 
-          // Filtros propios de Wompi: Año, Mes, Día y Empresa
           const wAno = document.getElementById('wAno');
           for (let y = hoy.getFullYear(); y >= 2022; y--) {
             wAno.innerHTML += '<option value="' + y + '">AÑO ' + y + '</option>';
@@ -1474,7 +1580,6 @@ app.get('/', (req, res) => {
           document.getElementById('tablaWompi').innerHTML = MSG_WOMPI;
         }
 
-        // Años marcados en el selector de Facturación (de menor a mayor)
         function anosSeleccionados() {
           return Array.from(document.querySelectorAll('#panelAnos .chk-ano:checked')).map(function (c) { return c.value; }).sort();
         }
@@ -1487,12 +1592,10 @@ app.get('/', (req, res) => {
           p.style.display = p.style.display === 'none' ? 'block' : 'none';
         }
         function cambioAnos(chk) {
-          // Siempre debe quedar al menos un año marcado
           if (anosSeleccionados().length === 0) chk.checked = true;
           actualizarEtiquetaAnos();
         }
 
-        // ¿La factura cae dentro del periodo consultado? (per.ano puede ser un año o una lista de años)
         function enPeriodo(f, per) {
           if (!per) return false;
           const anos = [].concat(per.ano).map(String);
@@ -1500,7 +1603,6 @@ app.get('/', (req, res) => {
           return anos.indexOf(ef.slice(0, 4)) >= 0 && (!per.mes || Number(ef.slice(5, 7)) === Number(per.mes));
         }
 
-        // Búsqueda de Facturación / Consolidado: consulta Siigo solo cuando el operador lo confirma
         async function cargarFacturas() {
           const anos = anosSeleccionados();
           const mes = document.getElementById('selMes').value;
@@ -1510,7 +1612,6 @@ app.get('/', (req, res) => {
           document.getElementById('tablaFacturas').innerHTML = '<tr><td colspan="17" style="text-align:center;">Consultando Siigo' + (anos.length > 1 ? ' (' + anos.length + ' años, uno por uno)' : '') + '...</td></tr>';
           let resumen = [];
           try {
-            // Un año a la vez, para no saturar a Siigo
             let todas = [];
             const porEmpresa = {};
             for (let i = 0; i < anos.length; i++) {
@@ -1545,7 +1646,6 @@ app.get('/', (req, res) => {
           aplicarFiltros();
         }
 
-        // Botón BUSCAR / ACTUALIZAR: si cambió el año o el mes se consulta Siigo; si no, solo se aplican los filtros
         function buscarFacturacion() {
           const anos = anosSeleccionados();
           const mes = document.getElementById('selMes').value;
@@ -1553,7 +1653,6 @@ app.get('/', (req, res) => {
           if (igual && !recargarFacturas && facturasGlobales.length) { aplicarFiltros(); } else { cargarFacturas(); }
         }
 
-        // Búsqueda exclusiva de Wompi: Año, Mes, Día y Empresa. Vuelve a leer Siigo sin caché.
         async function cargarWompi() {
           const ano = document.getElementById('wAno').value;
           const mes = document.getElementById('wMes').value;
@@ -1638,7 +1737,6 @@ app.get('/', (req, res) => {
           const fCli = document.getElementById('filterCliente').value.trim().toUpperCase();
           const fResp = document.getElementById('filterResponsable').value;
           const fEmp = document.getElementById('filterEmpresa').value;
-          // Las facturas con nota crédito se ocultan, salvo que se marque "Ver facturas con nota crédito"
           const verNC = document.getElementById('chkNC').checked;
           const nNC = facturasGlobales.filter(function (f) { return f.tieneNotaCredito; }).length;
           document.getElementById('cntNC').innerText = nNC ? '(' + nNC + (verNC ? ' visibles' : ' ocultas') + ')' : '';
@@ -1651,14 +1749,12 @@ app.get('/', (req, res) => {
                    (verNC || !f.tieneNotaCredito);
           });
 
-          // Facturación y Consolidado muestran todo menos las ventas Wompi; esas van en su pestaña
           const normales = filtradas.filter(function (f) { return !f.esWompi; }).sort(ordenarFacturas);
 
           if (tabActual === 'facturacion') {
             if (!periodoFact) { document.getElementById('tablaFacturas').innerHTML = MSG_FACT; document.getElementById('totalKPI').innerText = fmt(0); }
             else renderFacturas(normales, 'tablaFacturas');
           } else if (tabActual === 'wompi') {
-            // Wompi usa solo Año y Mes (en la consulta), Día y Empresa; las notas crédito siempre se ocultan
             const wDia = document.getElementById('wDia').value;
             const wEmp = document.getElementById('wEmpresa').value;
             const wompi = wompiGlobales.filter(function (f) {
@@ -1674,17 +1770,14 @@ app.get('/', (req, res) => {
           }
         }
 
-        // Busca una factura en cualquiera de las dos listas cargadas
         function buscarFactura(empId, id) {
           const mismo = function (x) { return String(x.empresaId) === empId && String(x.id) === id; };
           return facturasGlobales.find(mismo) || wompiGlobales.find(mismo);
         }
 
         function fmt(n) { return '$ ' + Number(n || 0).toLocaleString('es-CO'); }
-
         function pad2(n) { return (n < 10 ? '0' : '') + n; }
 
-        // Opciones del selector: los 11 meses anteriores al de la factura, el propio y el siguiente
         function opcionesMes(f) {
           const y = Number(String(f.fecha).slice(0, 4));
           const m = Number(String(f.fecha).slice(5, 7));
@@ -1698,7 +1791,6 @@ app.get('/', (req, res) => {
           return lista;
         }
 
-        // Celda MES: selector editable que guarda el mes elegido para esa factura
         function celdaMes(f) {
           if (!f.id || !f.fecha || f.empresaId === undefined) return esc(f.mes);
           const propio = String(f.fecha).slice(0, 7);
@@ -1711,7 +1803,6 @@ app.get('/', (req, res) => {
             }).join('') + '</select>';
         }
 
-        // Celda MÓDULO: selector para decidir si la factura va en Facturación o en Ventas Wompi
         function celdaModulo(f) {
           if (!f.id || f.empresaId === undefined) return '-';
           const actual = f.esWompi ? 'WOMPI' : 'FACTURACION';
@@ -1729,7 +1820,6 @@ app.get('/', (req, res) => {
           if (!f) return;
           const nuevo = sel.value;
           const previo = f.esWompi ? 'WOMPI' : 'FACTURACION';
-          // Si lo elegido coincide con la clasificación automática, se quita la elección manual
           const valor = nuevo === (f.esWompiAuto ? 'WOMPI' : 'FACTURACION') ? '' : nuevo;
           sel.disabled = true;
           try {
@@ -1741,7 +1831,6 @@ app.get('/', (req, res) => {
             if (!res.ok) throw new Error('fallo');
             f.moduloAsignado = valor;
             f.esWompi = nuevo === 'WOMPI';
-            // La factura pasa a la lista del módulo elegido si ese periodo ya está consultado
             if (f.esWompi && wompiGlobales.indexOf(f) < 0 && enPeriodo(f, periodoWompi)) wompiGlobales.push(f);
             if (!f.esWompi && facturasGlobales.indexOf(f) < 0 && enPeriodo(f, periodoFact)) facturasGlobales.push(f);
             aplicarFiltros();
@@ -1777,7 +1866,6 @@ app.get('/', (req, res) => {
             f.numMes = Number(ef.slice(5, 7)) - 1;
             f.mes = NOMBRES_MES[f.numMes];
             sel.classList.toggle('cambiado', !!valor);
-            // Si el mes elegido queda fuera del periodo que se está consultando, la factura sale de esta lista
             const enWompi = wompiGlobales.indexOf(f) >= 0;
             const dentro = enPeriodo(f, enWompi ? periodoWompi : periodoFact);
             if (!dentro) {
@@ -1795,19 +1883,16 @@ app.get('/', (req, res) => {
           sel.disabled = false;
         }
 
-        // Facturas de mayor a menor consecutivo
         function ordenarFacturas(a, b) {
           return (b.consecutivo || 0) - (a.consecutivo || 0) ||
                  String(b.fecha).localeCompare(String(a.fecha)) ||
                  String(a.empresa).localeCompare(String(b.empresa));
         }
 
-        // Comercial en texto (Consolidado)
         function celdaComercial(f) {
           return (!f.responsable || f.responsable === 'N/A') ? '<span style="color:#94a3b8;">SIN COMERCIAL</span>' : esc(f.responsable);
         }
 
-        // Comercial de la factura: por defecto el del cliente (Terceros); se puede cambiar solo en esta factura
         function celdaComercialFactura(f) {
           if (!f.id || f.empresaId === undefined) return celdaComercial(f);
           const porCliente = (!f.comercialCliente || f.comercialCliente === 'N/A') ? 'SIN COMERCIAL' : f.comercialCliente;
@@ -1849,7 +1934,6 @@ app.get('/', (req, res) => {
           sel.disabled = false;
         }
 
-        // Condición: se puede cambiar a PAGADO o PENDIENTE; por defecto sale del saldo de Siigo
         function celdaCondicion(f, badgeClass) {
           if (!f.id || f.empresaId === undefined) return '<span class="' + badgeClass + '">' + esc(f.condicion) + '</span>';
           const cambiado = !!f.condicionManual;
@@ -1863,7 +1947,6 @@ app.get('/', (req, res) => {
           const f = buscarFactura(sel.getAttribute('data-emp'), sel.getAttribute('data-id'));
           if (!f) return;
           const nuevo = sel.value;
-          // Si coincide con lo que dice Siigo, se quita el cambio manual
           const valor = nuevo === f.condicionAuto ? '' : nuevo;
           sel.disabled = true;
           try {
@@ -1883,7 +1966,6 @@ app.get('/', (req, res) => {
           sel.disabled = false;
         }
 
-        // Valor bruto en pesos; si la factura es en moneda extranjera se indica con la tasa usada
         function celdaValor(f) {
           const base = '<b>' + fmt(f.valor) + '</b>';
           if (!f.moneda || f.moneda === 'COP') return base;
@@ -1927,8 +2009,6 @@ app.get('/', (req, res) => {
           let totalGeneral = 0;
 
           data.forEach(function (f) {
-            // Con un solo año, si el mes asignado cae en otro año se deja en el mes real de la factura para no perder el valor.
-            // Con varios años cada año va en su propia fila: "CLIENTE (2025)".
             const anos = periodoFact ? periodoFact.ano : [];
             const varios = anos.length > 1;
             const idx = varios || f.anoMes === undefined || String(f.anoMes) === anos[0] ? f.numMes : f.numMesFactura;
@@ -1947,7 +2027,6 @@ app.get('/', (req, res) => {
               meses.map(function (m) { return '<td class="num">' + (m > 0 ? fmt(m) : '-') + '</td>'; }).join('') +
               '<td class="num"><b>' + fmt(totalCliente) + '</b></td></tr>';
           });
-          // Fila de totales por columna
           if (html) {
             html += '<tr class="fila-total"><td>TOTAL</td>' +
               totalesMes.map(function (m) { return '<td class="num">' + (m !== 0 ? fmt(m) : '-') + '</td>'; }).join('') +
@@ -2001,7 +2080,6 @@ app.get('/', (req, res) => {
           cargarContratos();
         }
 
-        // ---------- Terceros ----------
         async function cargarTerceros(refrescar) {
           document.getElementById('tablaTerceros').innerHTML = '<tr><td colspan="8" style="text-align:center;">Cargando terceros desde Siigo (la primera vez puede tardar)...</td></tr>';
           try {
@@ -2029,7 +2107,6 @@ app.get('/', (req, res) => {
           filtrarTerceros();
         }
 
-        // Filtro de la pestaña: Todos / Sin comercial / Con comercial / cada comercial
         function poblarComerciales() {
           const sel = document.getElementById('tAsignacion');
           const previo = sel.value;
@@ -2038,7 +2115,6 @@ app.get('/', (req, res) => {
           sel.value = previo;
         }
 
-        // Lista desplegable por fila con los comerciales disponibles
         function selectComercial(t) {
           const opciones = comerciales.slice();
           if (t.comercial && opciones.indexOf(t.comercial) < 0) opciones.push(t.comercial);
@@ -2104,10 +2180,8 @@ app.get('/', (req, res) => {
 
         iniciarSelectoresFecha();
 
-        // ---------- Rutas: #/inicio, #/comercial/<área>, #/cartera ----------
         const AREAS_COMERCIAL = { 'facturacion': 'facturacion', 'ventas-wompi': 'wompi', 'consolidado': 'consolidado', 'contratos': 'contratos', 'terceros': 'terceros' };
 
-        // Menú lateral contraíble: la preferencia se recuerda en este navegador
         function aplicarMenu(cerrado) {
           document.querySelector('.app').classList.toggle('menu-cerrado', cerrado);
           const b = document.getElementById('btnMenu');
@@ -2117,9 +2191,9 @@ app.get('/', (req, res) => {
         function alternarMenu() {
           const cerrado = !document.querySelector('.app').classList.contains('menu-cerrado');
           aplicarMenu(cerrado);
-          try { localStorage.setItem('menuCerrado', cerrado ? '1' : '0'); } catch (e) { /* sin almacenamiento */ }
+          try { localStorage.setItem('menuCerrado', cerrado ? '1' : '0'); } catch (e) { }
         }
-        try { if (localStorage.getItem('menuCerrado') === '1') aplicarMenu(true); } catch (e) { /* sin almacenamiento */ }
+        try { if (localStorage.getItem('menuCerrado') === '1') aplicarMenu(true); } catch (e) { }
 
         function irA(ruta) { location.hash = '#/' + ruta; }
 
@@ -2138,12 +2212,10 @@ app.get('/', (req, res) => {
           document.getElementById('navComercial').classList.toggle('activo', pagina === 'comercial');
           document.getElementById('navCartera').classList.toggle('activo', pagina === 'cartera');
 
-          // [LÍNEA 3 DE 3] Al entrar a Cartera se monta la vista y se carga con las facturas ya consultadas
           if (pagina === 'cartera') { montarEstructuraCartera('pgCartera'); inicializarCartera(); }
 
           if (pagina === 'comercial') {
             const tab = AREAS_COMERCIAL[partes[1]] || 'facturacion';
-            // Siigo no se consulta al entrar: solo cuando el operador presiona BUSCAR / ACTUALIZAR
             switchTab(tab);
           }
         }
@@ -2159,134 +2231,4 @@ app.get('/', (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Servidor AutenTIC corriendo en el puerto ${PORT}`);
-});
-// ============================================================================
-// PEGAR EN index.js, justo ANTES de la línea:   // Endpoints para Contratos
-// ============================================================================
-
-// ---------- Cartera: TODAS las facturas con saldo pendiente de ambas empresas ----------
-// Siigo no expone el "Reporte de cartera" en su API; se arma recorriendo las facturas desde CARTERA_DESDE
-// (por defecto 2022-01-01, se cambia con la variable CARTERA_DESDE del .env) y quedándose con las que tienen saldo.
-const CARTERA_DESDE = /^\d{4}-\d{2}-\d{2}$/.test(process.env.CARTERA_DESDE || '') ? process.env.CARTERA_DESDE : '2022-01-01';
-let carteraCache = { ts: 0, data: null };
-let carteraEnCurso = null;
-
-async function carteraDeEmpresa(emp) {
-  const token = await getToken(emp);
-  if (!token) return { lista: [], nota: '' };
-
-  const hoy = new Date().toISOString().slice(0, 10);
-  const anoIni = Number(CARTERA_DESDE.slice(0, 4));
-  const anoFin = new Date().getFullYear();
-
-  // Un año a la vez (igual que Facturación) y sin duplicados en los bordes del rango
-  const porId = new Map();
-  for (let y = anoIni; y <= anoFin; y++) {
-    const desde = y === anoIni ? CARTERA_DESDE : `${y}-01-01`;
-    const hasta = y === anoFin ? hoy : `${y}-12-31`;
-    const parte = await traerFacturas(token, sumarDias(desde, -1), sumarDias(hasta, 1));
-    parte.forEach(f => porId.set(String(f.id), f));
-  }
-  const facturas = [...porId.values()].filter(f => !f.annulled);
-
-  // Moneda extranjera -> pesos (misma lógica que Facturación)
-  const aPesos = (f, n) => {
-    const moneda = String((f.currency && f.currency.code) || 'COP').toUpperCase();
-    const tasaApi = Number(f.currency && f.currency.exchange_rate);
-    const tasa = moneda !== 'COP' && tasaApi > 0 ? tasaApi : 1;
-    return Math.round((Number(n) || 0) * tasa * 100) / 100;
-  };
-
-  // Condición final: la manual (si la hay) manda sobre el saldo de Siigo
-  const pendientes = facturas.filter(f => {
-    const manual = condicionesManuales[`${emp.id}:${f.id}`];
-    if (manual === 'PAGADO') return false;
-    if (manual === 'PENDIENTE') return true;
-    return aPesos(f, f.balance) > 0;
-  });
-
-  const notas = [];
-  const avisoClientes = await resolverClientes(emp, token, pendientes);
-  if (avisoClientes) notas.push(avisoClientes);
-
-  let ncMapa = null;
-  try {
-    ncMapa = await notasCreditoPorFactura(emp, token, CARTERA_DESDE, false);
-  } catch (e) {
-    notas.push(`No se pudieron cargar las notas crédito (${describirError(e)}).`);
-  }
-
-  const lista = pendientes.map(f => {
-    const c = f.customer || {};
-    const nit = c.identification || '';
-    const nombre = clientesCache.get(`${emp.id}:${c.id}`) || nombreDeCliente(c) || (nit ? `CLIENTE (${nit})` : 'N/A');
-    const saldoSiigo = aPesos(f, f.balance);
-    const total = aPesos(f, f.total);
-    const nc = ncMapa ? (ncMapa.porId.get(String(f.id)) || ncMapa.porNombre.get(String(f.name))) : null;
-    const comFactura = comercialesFactura[`${emp.id}:${f.id}`] || '';
-    const nombreVend = f.seller && typeof f.seller === 'object' ? String(f.seller.name || '').trim() : '';
-    return {
-      id: f.id,
-      empresaId: emp.id,
-      empresa: emp.nombre,
-      cliente: nombre.toUpperCase(),
-      nit,
-      numero: f.name || f.id,
-      fecha: f.date,
-      vencimiento: (f.payments && f.payments[0] && f.payments[0].due_date) || '-',
-      total,
-      // Si el usuario marcó PENDIENTE a mano y Siigo trae saldo 0, se usa el total de la factura
-      saldo: saldoSiigo > 0 ? saldoSiigo : total,
-      condicion: 'PENDIENTE',
-      moneda: String((f.currency && f.currency.code) || 'COP').toUpperCase(),
-      responsable: comFactura === 'SIN COMERCIAL' ? 'N/A' : (comFactura || asignaciones[String(nit).trim()] || (/^\d+$/.test(nombreVend) ? '' : nombreVend) || 'N/A'),
-      tieneNotaCredito: !!nc,
-      notasCredito: nc ? nc.nombres.join(', ') : ''
-    };
-  });
-
-  return { lista, nota: notas.join(' '), revisadas: facturas.length };
-}
-
-async function construirCartera() {
-  const resultados = await Promise.all(empresas.map(async (emp) => {
-    if (!emp.user || !emp.key) {
-      return { empresa: emp.nombre, lista: [], error: `Faltan credenciales (EMPRESA${emp.id}_USER / EMPRESA${emp.id}_KEY) en el .env` };
-    }
-    try {
-      const r = await carteraDeEmpresa(emp);
-      return { empresa: emp.nombre, lista: r.lista, nota: r.nota, revisadas: r.revisadas, error: null };
-    } catch (e) {
-      const error = describirError(e);
-      console.error(`[${emp.nombre}] Error armando la cartera:`, error);
-      return { empresa: emp.nombre, lista: [], error };
-    }
-  }));
-  return {
-    cartera: resultados.flatMap(r => r.lista),
-    resumen: resultados.map(r => ({ empresa: r.empresa, cantidad: r.lista.length, revisadas: r.revisadas || 0, error: r.error, nota: r.nota || '' })),
-    desde: CARTERA_DESDE
-  };
-}
-
-// GET /api/cartera              -> usa caché de 10 min
-// GET /api/cartera?refrescar=1  -> vuelve a leer Siigo
-app.get('/api/cartera', async (req, res) => {
-  try {
-    await asignacionesListas;
-    await sincronizarRemoto();
-    const vigente = carteraCache.data && Date.now() - carteraCache.ts < 10 * 60 * 1000;
-    if (!req.query.refrescar && vigente) return res.json(carteraCache.data);
-
-    // Si ya hay una consulta en curso se espera esa misma (evita golpear a Siigo dos veces)
-    if (!carteraEnCurso) carteraEnCurso = construirCartera().finally(() => { carteraEnCurso = null; });
-    const data = await carteraEnCurso;
-
-    // Solo se cachea si ambas empresas respondieron bien
-    if (!data.resumen.some(r => r.error)) carteraCache = { ts: Date.now(), data };
-    res.json(data);
-  } catch (e) {
-    console.error('Error en /api/cartera:', e.message);
-    res.status(500).json({ error: e.message });
-  }
 });
